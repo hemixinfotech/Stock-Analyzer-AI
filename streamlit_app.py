@@ -246,11 +246,15 @@ def utc_now() -> str:
 
 
 def get_project_python() -> str:
-    configured = os.getenv("PROJECT_PYTHON", sys.executable)
-    candidate = Path(configured).expanduser()
-    if candidate.exists():
-        return str(candidate)
-    return configured
+    configured = os.getenv("PROJECT_PYTHON", "").strip()
+    if configured:
+        candidate = Path(configured).expanduser()
+        if candidate.exists():
+            return str(candidate)
+        resolved = shutil.which(configured)
+        if resolved:
+            return resolved
+    return sys.executable
 
 
 def clear_jobs_dir() -> None:
