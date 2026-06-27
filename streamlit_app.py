@@ -4,7 +4,7 @@ import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pandas as pd
 import streamlit as st
@@ -274,6 +274,33 @@ def load_json(path: Path) -> dict:
         return json.load(handle)
 
 
+def to_portable_artifact_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
+def resolve_artifact_path(path_value: str | Path) -> Path:
+    raw_path = str(path_value)
+    candidate = Path(raw_path).expanduser()
+    if candidate.exists():
+        return candidate
+    if not candidate.is_absolute():
+        repo_relative = (REPO_ROOT / candidate).resolve()
+        if repo_relative.exists():
+            return repo_relative
+
+    for pure_path in (PureWindowsPath(raw_path), PurePosixPath(raw_path)):
+        parts = [part for part in pure_path.parts if part not in (pure_path.anchor, pure_path.root, "\\", "/")]
+        if "jobs" in parts:
+            jobs_relative = REPO_ROOT.joinpath(*parts[parts.index("jobs"):])
+            if jobs_relative.exists():
+                return jobs_relative
+
+    return candidate
+
+
 def sanitize_index_name(index_name: str) -> str:
     return "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in index_name.strip().lower())
 
@@ -311,7 +338,7 @@ def write_per_index_json_files(output_json: Path, out_dir: Path, indices: list[s
         }
         out_path = out_dir / f"results_trend_{sanitize_index_name(index_name)}.json"
         write_json(out_path, index_payload)
-        artifacts[f"{sanitize_index_name(index_name)}_json_report"] = str(out_path)
+        artifacts[f"{sanitize_index_name(index_name)}_json_report"] = to_portable_artifact_path(out_path)
     return artifacts
 
 
@@ -352,10 +379,10 @@ def refresh_trend_data(index_name: str, lookback: int, intraday: bool) -> dict:
             "exit_code": analyzer_result.returncode,
             "error_excerpt": (analyzer_result.stderr or analyzer_result.stdout or "").strip()[-4000:],
             "artifacts": {
-                "job_dir": str(LATEST_JOB_DIR),
-                "results_json": str(output_json),
-                "agent_stdout_log": str(agent_stdout),
-                "agent_stderr_log": str(agent_stderr),
+                "job_dir": to_portable_artifact_path(LATEST_JOB_DIR),
+                "results_json": to_portable_artifact_path(output_json),
+                "agent_stdout_log": to_portable_artifact_path(agent_stdout),
+                "agent_stderr_log": to_portable_artifact_path(agent_stderr),
             },
             "params": {
                 "index": index_name,
@@ -376,10 +403,10 @@ def refresh_trend_data(index_name: str, lookback: int, intraday: bool) -> dict:
         "started_at": utc_now(),
         "finished_at": utc_now(),
         "artifacts": {
-            "job_dir": str(LATEST_JOB_DIR),
-            "results_json": str(output_json),
-            "agent_stdout_log": str(agent_stdout),
-            "agent_stderr_log": str(agent_stderr),
+            "job_dir": to_portable_artifact_path(LATEST_JOB_DIR),
+            "results_json": to_portable_artifact_path(output_json),
+            "agent_stdout_log": to_portable_artifact_path(agent_stdout),
+            "agent_stderr_log": to_portable_artifact_path(agent_stderr),
             **per_index_artifacts,
         },
         "params": {
@@ -484,7 +511,10 @@ def render_results(status_payload: dict) -> None:
     if not report_path:
         st.info("Selected index data is not available in the latest run.")
         return
-    render_index_result(INDEX_LABELS.get(selected_index, selected_index), load_json(Path(report_path)))
+    render_index_result(
+        INDEX_LABELS.get(selected_index, selected_index),
+        load_json(resolve_artifact_path(report_path)),
+    )
 
 
 def load_existing_status() -> dict | None:
