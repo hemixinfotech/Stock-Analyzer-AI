@@ -276,14 +276,15 @@ def load_json(path: Path) -> dict:
 
 def to_portable_artifact_path(path: Path) -> str:
     try:
-        return str(path.relative_to(REPO_ROOT))
+        return path.relative_to(REPO_ROOT).as_posix()
     except ValueError:
         return str(path)
 
 
 def resolve_artifact_path(path_value: str | Path) -> Path:
     raw_path = str(path_value)
-    candidate = Path(raw_path).expanduser()
+    normalized_raw_path = raw_path.replace("\\", "/")
+    candidate = Path(normalized_raw_path).expanduser()
     if candidate.exists():
         return candidate
     if not candidate.is_absolute():
@@ -511,9 +512,13 @@ def render_results(status_payload: dict) -> None:
     if not report_path:
         st.info("Selected index data is not available in the latest run.")
         return
+    resolved_report_path = resolve_artifact_path(report_path)
+    if not resolved_report_path.exists():
+        st.info("Latest cached report is unavailable on this deployment. Click **Refresh Data** to generate a new report.")
+        return
     render_index_result(
         INDEX_LABELS.get(selected_index, selected_index),
-        load_json(resolve_artifact_path(report_path)),
+        load_json(resolved_report_path),
     )
 
 

@@ -3,11 +3,11 @@
   "started_at": "2026-06-27T17:10:59.316343Z",
   "finished_at": "2026-06-27T17:10:59.316343Z",
   "artifacts": {
-    "job_dir": "jobs\\latest",
-    "results_json": "jobs\\latest\\results_nifty_trend.json",
-    "agent_stdout_log": "jobs\\latest\\agent.stdout.log",
-    "agent_stderr_log": "jobs\\latest\\agent.stderr.log",
-    "nifty50_json_report": "jobs\\latest\\results_trend_nifty50.json"
+    "job_dir": "jobs/latest",
+    "results_json": "jobs/latest/results_nifty_trend.json",
+    "agent_stdout_log": "jobs/latest/agent.stdout.log",
+    "agent_stderr_log": "jobs/latest/agent.stderr.log",
+    "nifty50_json_report": "jobs/latest/results_trend_nifty50.json"
   },
   "params": {
     "index": "nifty50",
