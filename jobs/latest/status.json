@@ -1,0 +1,18 @@
+{
+  "status": "completed",
+  "started_at": "2026-06-27T12:26:38.601147Z",
+  "finished_at": "2026-06-27T12:26:38.601147Z",
+  "artifacts": {
+    "job_dir": "C:\\Users\\Hemant\\Stock Analyzer AI\\Stock-Analyzer-AI\\jobs\\latest",
+    "results_json": "C:\\Users\\Hemant\\Stock Analyzer AI\\Stock-Analyzer-AI\\jobs\\latest\\results_nifty_trend.json",
+    "agent_stdout_log": "C:\\Users\\Hemant\\Stock Analyzer AI\\Stock-Analyzer-AI\\jobs\\latest\\agent.stdout.log",
+    "agent_stderr_log": "C:\\Users\\Hemant\\Stock Analyzer AI\\Stock-Analyzer-AI\\jobs\\latest\\agent.stderr.log",
+    "nifty_midcap_100_json_report": "C:\\Users\\Hemant\\Stock Analyzer AI\\Stock-Analyzer-AI\\jobs\\latest\\results_trend_nifty_midcap_100.json"
+  },
+  "params": {
+    "index": "nifty_midcap_100",
+    "lookback": 30,
+    "intraday": false,
+    "python_executable": "C:\\Users\\Hemant\\AppData\\Local\\Programs\\Python\\Python312\\python.exe"
+  }
+}
