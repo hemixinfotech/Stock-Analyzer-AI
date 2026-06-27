@@ -12,7 +12,7 @@ import argparse
 import json
 import time
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -44,6 +44,10 @@ FYERS_API_KEY = os.getenv('FYERS_API_KEY', '')
 FYERS_ACCESS_TOKEN = os.getenv('FYERS_ACCESS_TOKEN', '')
 FYERS_BASE_URL = 'https://api.fyers.in/api/v3'
 FYERS_QUOTE_URL = 'https://api.fyers.in/api/v3/quotes'
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
 
 
 def get_constituents_from_wikipedia(index_name):
@@ -593,11 +597,11 @@ def main(argv=None):
                     price_action_lookback=args.price_action_lookback,
                 )
                 if item:
-                    item.update({'index': idx, 'timestamp': datetime.utcnow().isoformat() + 'Z'})
+                    item.update({'index': idx, 'timestamp': utc_now_iso()})
                     records.append(item)
             except Exception as e:
                 # continue on per-ticker errors
-                records.append({'ticker': s, 'error': str(e), 'index': idx, 'timestamp': datetime.utcnow().isoformat() + 'Z'})
+                records.append({'ticker': s, 'error': str(e), 'index': idx, 'timestamp': utc_now_iso()})
 
     # market summary
     total = len([r for r in records if 'trend' in r])
@@ -614,7 +618,7 @@ def main(argv=None):
             market_trend = 'bearish'
 
     summary = {
-        'timestamp': datetime.utcnow().isoformat() + 'Z',
+        'timestamp': utc_now_iso(),
         'total_tickers': total,
         'percent_up': percent_up,
         'percent_down': percent_down,

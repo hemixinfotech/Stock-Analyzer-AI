@@ -8,7 +8,7 @@ This project fetches index constituents, obtains OHLCV price series (daily or in
 
 **Data Source**: Real-time prices from **Fyers API** (preferred) or yfinance (fallback)
 
-Outputs are JSON/CSV files with per-ticker signals and a market summary (percent_up/percent_down, market_trend_label).
+Outputs are JSON files with per-ticker signals and a market summary (percent_up/percent_down, market_trend_label).
 
 ## Quickstart
 
@@ -16,7 +16,7 @@ Outputs are JSON/CSV files with per-ticker signals and a market summary (percent
 - Python 3.11+ recommended.
 - Install runtime deps (the repository has no requirements.txt):
   ```bash
-  python -m pip install pandas numpy requests yfinance pykalman filterpy ta tqdm python-dotenv
+  python -m pip install pandas numpy requests yfinance pykalman filterpy ta tqdm python-dotenv streamlit
   ```
 
 ### 2. (Optional) Configure Fyers API for Real-Time Data
@@ -35,17 +35,30 @@ For real-time stock prices instead of delayed yfinance data:
 # With config files (no Fyers needed, uses yfinance)
 python "scripts\agent_nifty_trend.py" --indices "nifty50,nifty_midcap_100,nifty_smallcap_100" --out "results_nifty_trend.json"
 
-# Generate CSV reports
-python "scripts\generate_trend_csv.py"
 ```
+
+### 4. Run the Streamlit Dashboard
+```bash
+C:\Users\Hemant\AppData\Local\Programs\Python\Python312\python.exe -m streamlit run "streamlit_app.py"
+```
+
+Use the **Refresh Data** button in the sidebar to run `scripts\agent_nifty_trend.py` directly for the selected index, show a loading bar while the refresh is in progress, and render the latest JSON results in the UI.
+
+Each refresh clears any existing folders under `jobs\` so only the latest output remains. The new run writes a fresh `jobs\latest\` folder containing:
+- `status.json`
+- `results_nifty_trend.json`
+- `results_trend_nifty50.json` or the matching selected-index JSON file
+- stdout/stderr logs for both Python scripts
+
+If a refresh fails with `ModuleNotFoundError` such as `No module named 'numpy'`, set `PROJECT_PYTHON` to the correct interpreter before starting Streamlit, or install the dependencies into that interpreter.
 
 ## Repository Layout
 
 - **scripts/**: CLI scripts
   - `agent_nifty_trend.py` - Main trend analysis engine (Fyers + yfinance support)
-  - `generate_trend_csv.py` - Convert JSON to CSV per-index reports
   - `fetch_bse_constituents.py` - Fetch constituents from NSE/Wikipedia
-  
+- `streamlit_app.py` - Streamlit dashboard that runs the scripts directly and renders the latest JSON output
+
 - **configs/**: Static index constituent lists (JSON format)
   - `nifty50.json`, `nifty_midcap_100.json`, `nifty_smallcap_100.json`
   
@@ -57,7 +70,7 @@ python "scripts\generate_trend_csv.py"
 ✅ **Fallback Support**: Automatic fallback to yfinance if Fyers not configured
 ✅ **Multiple Indicators**: EMA20/50, SMA20/50, SuperTrend, Kalman Filter, Price Action
 ✅ **Voting Logic**: Robust trend determination using multiple signals
-✅ **CSV Export**: Generate reports segmented by index
+✅ **Streamlit UI**: Refresh and browse the latest trend JSON output in a dashboard
 ✅ **Config-based**: All constituents loaded from JSON configs (no hardcoding)
 
 ## Data Sources
@@ -107,10 +120,10 @@ Run `agent_nifty_trend.py --help` for all options:
 }
 ```
 
-### CSV Output (separate files per index)
-- `results_trend_all.csv` - All stocks
-- `results_trend_midcap.csv` - Nifty Midcap 100 only
-- `results_trend_smallcap.csv` - Nifty Smallcap 100 only
+### Streamlit Refresh Output
+- Each refresh writes outputs under `jobs/latest/`
+- `status.json` tracks whether the last refresh completed or failed
+- JSON artifacts are recreated on each refresh so old results do not accumulate
 
 ## Technical Details
 
