@@ -33,26 +33,13 @@ def apply_page_style() -> None:
         """
         <style>
         #MainMenu,
-        header,
         footer,
-        [data-testid="stHeader"],
-        [data-testid="stToolbar"],
         [data-testid="stStatusWidget"],
-        [data-testid="stHeaderActionElements"],
         [data-testid="stDecoration"] {
             display: none !important;
             visibility: hidden !important;
         }
         @media (max-width: 768px) {
-            header,
-            [data-testid="stHeader"],
-            [data-testid="stToolbar"],
-            [data-testid="stStatusWidget"],
-            [data-testid="stHeaderActionElements"],
-            [data-testid="stDecoration"] {
-                display: block !important;
-                visibility: visible !important;
-            }
             .block-container {
                 padding-top: 1rem;
                 padding-left: 0.8rem;
