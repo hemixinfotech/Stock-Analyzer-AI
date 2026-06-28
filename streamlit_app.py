@@ -26,6 +26,17 @@ def apply_page_style() -> None:
     st.markdown(
         """
         <style>
+        #MainMenu,
+        header,
+        footer,
+        [data-testid="stHeader"],
+        [data-testid="stToolbar"],
+        [data-testid="stStatusWidget"],
+        [data-testid="stHeaderActionElements"],
+        [data-testid="stDecoration"] {
+            display: none !important;
+            visibility: hidden !important;
+        }
         .stApp {
             background:
                 radial-gradient(circle at top left, rgba(59, 130, 246, 0.16), transparent 28%),
