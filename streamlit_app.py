@@ -35,7 +35,12 @@ def apply_page_style() -> None:
         #MainMenu,
         footer,
         [data-testid="stStatusWidget"],
-        [data-testid="stDecoration"] {
+        [data-testid="stDecoration"],
+        [data-testid="stHeaderActionElements"],
+        .stAppDeployButton,
+        a[href*="streamlit.io"],
+        a[href*="share.streamlit.io"],
+        a[href*="github.com"] {
             display: none !important;
             visibility: hidden !important;
         }
