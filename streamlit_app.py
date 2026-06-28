@@ -43,8 +43,10 @@ def apply_page_style() -> None:
         [data-testid="stHeaderActionElements"],
         .stHeaderActionElements,
         [data-testid="stAppViewContainer__fork-button"],
-        [data-testid="stAppHeaderButton"],
+        [data-testid="stGithubButton"],
+        [data-testid="stRepoButton"],
         [data-testid="stToolbarActions"] a,
+        header[data-testid="stHeader"] [data-testid="stToolbarActions"],
         header[data-testid="stHeader"] a[href*="github.com"],
         header[data-testid="stHeader"] a[href*="streamlit.io"],
         header[data-testid="stHeader"] *[href*="github.com"],
@@ -77,8 +79,48 @@ def apply_page_style() -> None:
             background: linear-gradient(180deg, #020617 0%, #0f172a 45%, #172554 100%);
             border-right: 1px solid rgba(148, 163, 184, 0.18);
         }
+        section[data-testid="stSidebar"] > div:first-child {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            padding-bottom: 4rem;
+            position: relative;
+        }
         [data-testid="stSidebar"] * {
             color: #e2e8f0;
+        }
+        button[aria-label="Close sidebar"],
+        [data-testid="stSidebarCollapseButton"] {
+            position: fixed !important;
+            left: 0.75rem !important;
+            bottom: 0.75rem !important;
+            top: auto !important;
+            right: auto !important;
+            z-index: 999999 !important;
+            background: rgba(15, 23, 42, 0.92) !important;
+            border: 1px solid rgba(148, 163, 184, 0.42) !important;
+            border-radius: 999px !important;
+            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.35) !important;
+        }
+        button[aria-label="Open sidebar"],
+        [data-testid="collapsedControl"] {
+            position: fixed !important;
+            left: 0.75rem !important;
+            bottom: 0.75rem !important;
+            top: auto !important;
+            right: auto !important;
+            z-index: 999999 !important;
+            background: rgba(15, 23, 42, 0.92) !important;
+            border: 1px solid rgba(148, 163, 184, 0.42) !important;
+            border-radius: 999px !important;
+            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.35) !important;
+        }
+        button[aria-label="Close sidebar"] svg,
+        button[aria-label="Open sidebar"] svg,
+        [data-testid="stSidebarCollapseButton"] svg,
+        [data-testid="collapsedControl"] svg {
+            fill: #ffffff !important;
+            color: #ffffff !important;
         }
         .block-container {
             padding-top: 2rem;
@@ -820,8 +862,6 @@ def main() -> None:
             key="predictor_index",
         )
         github_token_configured = bool(get_runtime_setting("GITHUB_TOKEN"))
-        if not github_token_configured:
-            st.caption("Configure `GITHUB_TOKEN` in Streamlit secrets, the repo-root `.env`, or environment variables to enable predictions.")
         sidebar_predictor_warning = None
         if st.button("GitHub AI Stock Predict", use_container_width=True):
             latest_status = st.session_state.get("latest_status")
