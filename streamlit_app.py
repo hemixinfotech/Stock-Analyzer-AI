@@ -35,6 +35,7 @@ def apply_page_style() -> None:
         #MainMenu,
         footer,
         [data-testid="stFooter"],
+        [data-testid="stFooter"] *,
         [data-testid="stStatusWidget"],
         [data-testid="stDecoration"],
         [data-testid="stHeaderActionElements"],
@@ -44,10 +45,17 @@ def apply_page_style() -> None:
         [data-testid="stToolbarActions"] a,
         header[data-testid="stHeader"] a[href*="github.com"],
         header[data-testid="stHeader"] a[href*="streamlit.io"],
+        header[data-testid="stHeader"] a,
+        header[data-testid="stHeader"] [role="link"],
         .stAppDeployButton,
         a[href*="streamlit.io"],
         a[href*="share.streamlit.io"],
         a[href*="github.com"] {
+            display: none !important;
+            visibility: hidden !important;
+        }
+        header[data-testid="stHeader"] button:not([aria-label*="sidebar"]):not([title*="sidebar"]),
+        header[data-testid="stHeader"] [role="button"]:not([aria-label*="sidebar"]):not([title*="sidebar"]) {
             display: none !important;
             visibility: hidden !important;
         }
