@@ -1,7 +1,7 @@
 {
   "status": "completed",
-  "started_at": "2026-06-27T17:10:59.316343Z",
-  "finished_at": "2026-06-27T17:10:59.316343Z",
+  "started_at": "2026-06-28T08:56:33.752837Z",
+  "finished_at": "2026-06-28T08:56:33.752837Z",
   "artifacts": {
     "job_dir": "jobs/latest",
     "results_json": "jobs/latest/results_nifty_trend.json",
@@ -11,7 +11,7 @@
   },
   "params": {
     "index": "nifty50",
-    "lookback": 30,
+    "lookback": 5,
     "intraday": false,
     "python_executable": "C:\\Users\\Hemant\\AppData\\Local\\Programs\\Python\\Python312\\python.exe"
   }

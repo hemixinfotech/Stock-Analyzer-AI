@@ -9,8 +9,14 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 import pandas as pd
 import streamlit as st
 
-
 REPO_ROOT = Path(__file__).resolve().parent
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv(REPO_ROOT / ".env")
+except Exception:
+    pass
+
 JOBS_DIR = REPO_ROOT / "jobs"
 LATEST_JOB_DIR = JOBS_DIR / "latest"
 INDEX_LABELS = {
@@ -36,6 +42,25 @@ def apply_page_style() -> None:
         [data-testid="stDecoration"] {
             display: none !important;
             visibility: hidden !important;
+        }
+        @media (max-width: 768px) {
+            header,
+            [data-testid="stHeader"],
+            [data-testid="stToolbar"],
+            [data-testid="stStatusWidget"],
+            [data-testid="stHeaderActionElements"],
+            [data-testid="stDecoration"] {
+                display: block !important;
+                visibility: visible !important;
+            }
+            .block-container {
+                padding-top: 1rem;
+                padding-left: 0.8rem;
+                padding-right: 0.8rem;
+            }
+            [data-testid="stSidebar"] {
+                min-width: 85vw !important;
+            }
         }
         .stApp {
             background:
@@ -146,6 +171,30 @@ def apply_page_style() -> None:
         }
         .trend-card div[data-testid="stInfo"] {
             width: 100% !important;
+        }
+        .predictor-card {
+            background: #ffffff;
+            border-radius: 18px;
+            padding: 1rem 1rem 0.6rem 1rem;
+            box-shadow: 0 12px 28px rgba(15, 23, 42, 0.08);
+            margin-bottom: 1rem;
+            border: 1px solid #dbeafe;
+        }
+        .predictor-card.up-card {
+            border-top: 5px solid #16a34a;
+            background: linear-gradient(180deg, #ecfdf5 0%, #ffffff 32%);
+        }
+        .predictor-card.down-card {
+            border-top: 5px solid #dc2626;
+            background: linear-gradient(180deg, #fef2f2 0%, #ffffff 32%);
+        }
+        .predictor-card h3 {
+            margin: 0 0 0.35rem 0;
+            font-size: 1.2rem;
+        }
+        .predictor-card p {
+            margin: 0 0 0.8rem 0;
+            color: #475569;
         }
         .sidebar-card {
             background: rgba(255, 255, 255, 0.08);
@@ -287,6 +336,10 @@ def write_json(path: Path, payload: dict) -> None:
 def load_json(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def records_have_rsi_values(records: list[dict]) -> bool:
+    return any(record.get("rsi") is not None for record in records if isinstance(record, dict))
 
 
 def to_portable_artifact_path(path: Path) -> str:
@@ -438,6 +491,79 @@ def refresh_trend_data(index_name: str, lookback: int, intraday: bool) -> dict:
     return status_payload
 
 
+def load_index_payload_from_status(status_payload: dict, index_name: str) -> dict | None:
+    artifacts = status_payload.get("artifacts", {})
+    artifact_key = f"{sanitize_index_name(index_name)}_json_report"
+    report_path = artifacts.get(artifact_key)
+    payload = None
+    resolved_report_path = None
+    if report_path:
+        resolved_report_path = resolve_artifact_path(report_path)
+        if resolved_report_path.exists():
+            payload = load_json(resolved_report_path)
+
+    combined_report_path = artifacts.get("results_json")
+    if combined_report_path:
+        resolved_combined_report_path = resolve_artifact_path(combined_report_path)
+        if resolved_combined_report_path.exists():
+            combined_payload = load_json(resolved_combined_report_path)
+            combined_records = [
+                record for record in combined_payload.get("records", [])
+                if record.get("index") == index_name
+            ]
+            if combined_records and (payload is None or not records_have_rsi_values(payload.get("records", []))):
+                payload = {
+                    "summary": build_index_summary(combined_records),
+                    "records": combined_records,
+                }
+                if resolved_report_path is not None:
+                    write_json(resolved_report_path, payload)
+
+    return payload
+
+
+def get_index_report_path_from_status(status_payload: dict, index_name: str) -> Path | None:
+    artifacts = status_payload.get("artifacts", {})
+    artifact_key = f"{sanitize_index_name(index_name)}_json_report"
+    report_path = artifacts.get(artifact_key)
+    if not report_path:
+        return None
+    resolved_report_path = resolve_artifact_path(report_path)
+    if resolved_report_path.exists():
+        return resolved_report_path
+    return None
+
+
+def run_openai_predictor(index_name: str, status_payload: dict) -> dict:
+    payload = load_index_payload_from_status(status_payload, index_name)
+    if payload is None:
+        raise ValueError(f"Refreshed data is unavailable for {index_name}. Please refresh the data first.")
+
+    report_path = get_index_report_path_from_status(status_payload, index_name)
+    if report_path is None:
+        raise ValueError(f"Refreshed report file is unavailable for {index_name}. Please refresh the data first.")
+
+    output_path = LATEST_JOB_DIR / f"prediction_{sanitize_index_name(index_name)}.json"
+    predictor_stdout = LATEST_JOB_DIR / "predictor.stdout.log"
+    predictor_stderr = LATEST_JOB_DIR / "predictor.stderr.log"
+    predictor_cmd = [
+        get_project_python(),
+        str(REPO_ROOT / "scripts" / "github_stock_predictor.py"),
+        "--input",
+        str(report_path),
+        "--index",
+        index_name,
+        "--out",
+        str(output_path),
+    ]
+    predictor_result = run_command(predictor_cmd, predictor_stdout, predictor_stderr)
+    if predictor_result.returncode != 0:
+        raise ValueError((predictor_result.stderr or predictor_result.stdout or "OpenAI predictor failed.").strip())
+    if not output_path.exists():
+        raise ValueError("GitHub Models predictor did not create an output file.")
+    return load_json(output_path)
+
+
 def render_summary(summary: dict) -> None:
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Total Tickers", summary.get("total_tickers", 0))
@@ -459,14 +585,26 @@ def render_index_result(title: str, payload: dict) -> None:
         frame["stock_name"] = frame["ticker"].astype(str).str.replace(".NS", "", regex=False)
     if "trend" in frame.columns:
         frame["trend direction"] = frame["trend"].astype(str).str.title()
-    visible_columns = [column for column in ["stock_name", "trend direction", "close"] if column in frame.columns]
+    visible_columns = [column for column in ["stock_name", "trend direction", "close", "rsi"] if column in frame.columns]
     display_frame = frame[visible_columns] if visible_columns else frame
 
     if "stock_name" in display_frame.columns:
-        display_frame = display_frame.rename(columns={"stock_name": "Stock Name", "trend direction": "Trend Direction", "close": "Close Price"})
+        display_frame = display_frame.rename(
+            columns={
+                "stock_name": "Stock Name",
+                "trend direction": "Trend Direction",
+                "close": "Close Price",
+                "rsi": "RSI",
+            }
+        )
 
     uptrend_frame = display_frame[display_frame["Trend Direction"] == "Up"] if "Trend Direction" in display_frame.columns else pd.DataFrame()
     downtrend_frame = display_frame[display_frame["Trend Direction"] == "Down"] if "Trend Direction" in display_frame.columns else pd.DataFrame()
+
+    if "RSI" in uptrend_frame.columns:
+        uptrend_frame = uptrend_frame.sort_values(by="RSI", ascending=False, na_position="last")
+    if "RSI" in downtrend_frame.columns:
+        downtrend_frame = downtrend_frame.sort_values(by="RSI", ascending=True, na_position="last")
 
     def themed_table_html(dataframe: pd.DataFrame, theme: str):
         table_class = "up-table" if theme == "up" else "down-table"
@@ -475,7 +613,7 @@ def render_index_result(title: str, payload: dict) -> None:
         for _, row in dataframe.iterrows():
             formatted_values = []
             for column, value in row.items():
-                if column == "Close Price" and isinstance(value, (int, float)):
+                if column in {"Close Price", "RSI"} and isinstance(value, (int, float)):
                     formatted_values.append(f"{value:.2f}")
                 else:
                     formatted_values.append(value)
@@ -509,7 +647,6 @@ def render_index_result(title: str, payload: dict) -> None:
 
 
 def render_results(status_payload: dict) -> None:
-    artifacts = status_payload.get("artifacts", {})
     selected_index = status_payload.get("params", {}).get("index", DEFAULT_INDEX)
 
     st.markdown(
@@ -522,18 +659,71 @@ def render_results(status_payload: dict) -> None:
         unsafe_allow_html=True,
     )
 
-    artifact_key = f"{sanitize_index_name(selected_index)}_json_report"
-    report_path = artifacts.get(artifact_key)
-    if not report_path:
-        st.info("Selected index data is not available in the latest run.")
-        return
-    resolved_report_path = resolve_artifact_path(report_path)
-    if not resolved_report_path.exists():
+    payload = load_index_payload_from_status(status_payload, selected_index)
+    if payload is None:
         st.info("Latest cached report is unavailable on this deployment. Click **Refresh Data** to generate a new report.")
         return
-    render_index_result(
-        INDEX_LABELS.get(selected_index, selected_index),
-        load_json(resolved_report_path),
+
+    render_index_result(INDEX_LABELS.get(selected_index, selected_index), payload)
+
+
+def render_prediction_results(prediction: dict) -> None:
+    st.markdown(
+        f"""
+        <div class="dashboard-hero">
+            <h2>GitHub AI Stock Predictor - {INDEX_LABELS.get(prediction.get("index", DEFAULT_INDEX), prediction.get("index", DEFAULT_INDEX))}</h2>
+            <p>Overall sentiment: {str(prediction.get("market_sentiment", "Unknown")).title()} | Source: {prediction.get("provider", "Unknown")}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if prediction.get("analysis"):
+        st.info(str(prediction["analysis"]))
+
+    def picks_to_frame(picks: list[dict]) -> pd.DataFrame:
+        frame = pd.DataFrame(picks)
+        if frame.empty:
+            return frame
+        frame["ticker"] = frame["ticker"].astype(str).str.replace(".NS", "", regex=False)
+        return frame.rename(
+            columns={
+                "ticker": "Stock Name",
+                "rsi": "RSI",
+                "close": "Close Price",
+                "signal_strength": "Signal Strength",
+                "volume_ratio": "Volume Ratio",
+            }
+        )
+
+    def themed_predictor_block(title: str, subtitle: str, dataframe: pd.DataFrame, theme: str) -> None:
+        st.markdown(
+            f"""
+            <div class="predictor-card {'up-card' if theme == 'up' else 'down-card'}">
+                <h3>{title}</h3>
+                <p>{subtitle}</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if dataframe.empty:
+            st.info(f"No {theme}trend picks available.")
+        else:
+            st.dataframe(dataframe, use_container_width=True, hide_index=True)
+
+    uptrend_frame = picks_to_frame(prediction.get("uptrend_picks", []))
+    downtrend_frame = picks_to_frame(prediction.get("downtrend_picks", []))
+
+    themed_predictor_block(
+        "AI Uptrend Picks",
+        "Top bullish continuation candidates for the selected refreshed index.",
+        uptrend_frame,
+        "up",
+    )
+    themed_predictor_block(
+        "AI Downtrend Picks",
+        "Top bearish continuation candidates for the selected refreshed index.",
+        downtrend_frame,
+        "down",
     )
 
 
@@ -552,6 +742,10 @@ def main() -> None:
 
     if "latest_status" not in st.session_state:
         st.session_state["latest_status"] = load_existing_status()
+    if "prediction_status" not in st.session_state:
+        st.session_state["prediction_status"] = None
+    if "prediction_result" not in st.session_state:
+        st.session_state["prediction_result"] = None
 
     with st.sidebar:
         st.header("Refresh Settings")
@@ -562,12 +756,49 @@ def main() -> None:
             index=INDEX_OPTIONS.index(DEFAULT_INDEX),
         )
         st.markdown('<div class="sidebar-card"><p>Lookback Period</p></div>', unsafe_allow_html=True)
-        lookback = st.number_input("Lookback Days", min_value=5, max_value=365, value=30, step=5)
+        lookback = st.number_input("Lookback Days", min_value=1, max_value=30, value=30, step=1)
         intraday = st.checkbox("Enable Intraday VWAP", value=False)
         if st.button("Refresh Data", type="primary", use_container_width=True):
             st.session_state["latest_status"] = refresh_trend_data(selected_index, int(lookback), intraday)
+            st.session_state["prediction_status"] = None
+            st.session_state["prediction_result"] = None
+
+        st.header("GitHub AI Stock Predictor")
+        predictor_index = st.selectbox(
+            "Predictor Index",
+            options=INDEX_OPTIONS,
+            format_func=lambda item: INDEX_LABELS[item],
+            index=INDEX_OPTIONS.index(DEFAULT_INDEX),
+            key="predictor_index",
+        )
+        sidebar_predictor_warning = None
+        if st.button("GitHub AI Stock Predict", use_container_width=True):
+            latest_status = st.session_state.get("latest_status")
+            if not latest_status or latest_status.get("status") != "completed":
+                st.session_state["prediction_status"] = {
+                    "status": "warning",
+                    "error_excerpt": "First refresh the data, then use GitHub AI Stock Predictor.",
+                }
+                sidebar_predictor_warning = st.session_state["prediction_status"]["error_excerpt"]
+            elif latest_status.get("params", {}).get("index") != predictor_index:
+                st.session_state["prediction_status"] = {
+                    "status": "warning",
+                    "error_excerpt": f"First refresh data for {INDEX_LABELS[predictor_index]}, then use GitHub AI Stock Predictor.",
+                }
+                sidebar_predictor_warning = st.session_state["prediction_status"]["error_excerpt"]
+            else:
+                try:
+                    prediction_result = run_openai_predictor(predictor_index, latest_status)
+                    st.session_state["prediction_status"] = {"status": "completed"}
+                    st.session_state["prediction_result"] = prediction_result
+                except ValueError as exc:
+                    st.session_state["prediction_status"] = {"status": "failed", "error_excerpt": str(exc)}
+                    sidebar_predictor_warning = str(exc)
+        if sidebar_predictor_warning:
+            st.warning(sidebar_predictor_warning)
 
     latest_status = st.session_state.get("latest_status")
+    prediction_result = st.session_state.get("prediction_result")
     if latest_status:
         if latest_status.get("status") == "failed":
             st.error("Trend refresh failed.")
@@ -575,11 +806,22 @@ def main() -> None:
                 st.caption(f"Failed step: `{latest_status['failed_step']}`")
             if latest_status.get("error_excerpt"):
                 st.code(latest_status["error_excerpt"])
-        else:
+        elif not prediction_result:
             st.success("Latest trend data loaded.")
             render_results(latest_status)
     else:
         st.info("Click **Refresh Data** to run the analyzer scripts and load the latest trend JSON files.")
+
+    prediction_status = st.session_state.get("prediction_status")
+    if prediction_status and prediction_status.get("status") == "warning":
+        if not prediction_result:
+            st.info("Use Refresh Data first, then run the GitHub AI Stock Predictor for the same selected index.")
+    elif prediction_status and prediction_status.get("status") == "failed":
+        st.error("GitHub AI stock prediction failed.")
+        if prediction_status.get("error_excerpt"):
+            st.code(str(prediction_status["error_excerpt"]))
+    elif prediction_result:
+        render_prediction_results(prediction_result)
 
 
 if __name__ == "__main__":

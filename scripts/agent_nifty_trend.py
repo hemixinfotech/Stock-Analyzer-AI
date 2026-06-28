@@ -211,6 +211,21 @@ def atr(df, period=14):
     return atr_series
 
 
+def compute_rsi(series, period=14):
+    """Compute RSI using Wilder smoothing."""
+    if series is None or len(series) == 0:
+        return pd.Series(dtype=float)
+    delta = series.diff()
+    gains = delta.clip(lower=0)
+    losses = -delta.clip(upper=0)
+    avg_gain = gains.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    avg_loss = losses.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.where(avg_loss != 0, 100.0)
+    return rsi
+
+
 def supertrend(df, period=10, multiplier=3.0):
     """Compute SuperTrend and return (trend_series (True=up), final_upper, final_lower)
     Expects df to contain High, Low, Close columns.
@@ -361,9 +376,11 @@ def fetch_history_yf(ticker, period_days=120):
 
 def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='5m', vote_mode='majority', supertrend_period=10, supertrend_multiplier=3.0, price_action_lookback=3):
     # fetch daily history
-    hist = fetch_history_yf(ticker, period_days=lookback_days + 10)
+    history_days = max(int(lookback_days) + 10, 60)
+    hist = fetch_history_yf(ticker, period_days=history_days)
     if hist is None or hist.empty:
         return None
+    volume = pd.Series(dtype=float)
     # normalize columns: support yfinance MultiIndex (Price, Ticker) and plain columns
     if isinstance(hist.columns, pd.MultiIndex):
         # try to find Close column by first level name
@@ -372,6 +389,9 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
             return None
         # select the first Close column (likely the ticker requested)
         close = hist[close_cols[0]].dropna()
+        volume_cols = [c for c in hist.columns if c[0] == 'Volume']
+        if volume_cols:
+            volume = hist[volume_cols[0]].dropna()
         if close.empty:
             return None
     else:
@@ -379,6 +399,8 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
             return None
         hist = hist.dropna(subset=['Close'])
         close = hist['Close']
+        if 'Volume' in hist.columns:
+            volume = hist['Volume'].dropna()
 
     # Moving averages (EMA and SMA)
     ema20_series = close.ewm(span=20, adjust=False).mean()
@@ -391,6 +413,12 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
     sma50_series = close.rolling(window=50, min_periods=1).mean()
     sma20 = sma20_series.iloc[-1]
     sma50 = sma50_series.iloc[-1]
+
+    rsi_series = compute_rsi(close)
+    rsi_value = float(rsi_series.iloc[-1]) if not rsi_series.dropna().empty else None
+    latest_volume = float(volume.iloc[-1]) if not volume.empty else None
+    avg_volume_20 = float(volume.tail(20).mean()) if not volume.empty else None
+    volume_ratio = (latest_volume / avg_volume_20) if latest_volume is not None and avg_volume_20 not in (None, 0) else None
 
     # Kalman smoothing
     kalman_vals = simple_kalman(close.ffill())
@@ -450,6 +478,7 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
     price_above_sma50 = latest_close > sma50
     ema_signal = ema20 > ema50
     kalman_signal = (kalman_level is not None) and (latest_close > kalman_level)
+    rsi_signal = None if rsi_value is None else rsi_value >= 50.0
     vwap_signal = None
     if intraday:
         if vwap_latest is None:
@@ -462,17 +491,17 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
     strong_down = False
     try:
         # primary strong up: price above 50SMA and EMA20>EMA50 with confirmation
-        if (latest_close > sma50) and (ema20 > ema50) and (st_trend is True or pa_bull is True or ema20_slope > 0):
+        if (latest_close > sma50) and (ema20 > ema50) and (st_trend is True or pa_bull is True or ema20_slope > 0) and (rsi_signal is not False):
             strong_up = True
         # secondary relaxed up: price above EMA20 and EMA20 slope positive with at least one supporting signal
-        if (latest_close > ema20) and (ema20_slope > 0) and (price_above_sma20 or pa_bull or (st_trend is True)):
+        if (latest_close > ema20) and (ema20_slope > 0) and (price_above_sma20 or pa_bull or (st_trend is True) or (rsi_signal is True)):
             strong_up = True
 
         # primary strong down
-        if (latest_close < sma50) and (ema20 < ema50) and (st_trend is False or pa_bear is True or ema20_slope < 0):
+        if (latest_close < sma50) and (ema20 < ema50) and (st_trend is False or pa_bear is True or ema20_slope < 0) and (rsi_signal is not True):
             strong_down = True
         # secondary relaxed down
-        if (latest_close < ema20) and (ema20_slope < 0) and (not price_above_sma20 or pa_bear or (st_trend is False)):
+        if (latest_close < ema20) and (ema20_slope < 0) and (not price_above_sma20 or pa_bear or (st_trend is False) or (rsi_signal is False)):
             strong_down = True
     except Exception:
         strong_up = False
@@ -491,6 +520,8 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
     signals.append(bool(price_above_sma20))
     signals.append(bool(price_above_sma50))
     signals.append(bool(ema_signal))
+    if rsi_signal is not None:
+        signals.append(bool(rsi_signal))
     if kalman_level is not None:
         signals.append(bool(kalman_signal))
     if intraday and vwap_signal is not None:
@@ -524,6 +555,10 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
         'ema50': float(ema50),
         'sma20': float(sma20),
         'sma50': float(sma50),
+        'rsi': rsi_value,
+        'volume': latest_volume,
+        'avg_volume_20': avg_volume_20,
+        'volume_ratio': volume_ratio,
         'ema20_slope': float(ema20_slope),
         'ma_crossover': bool(ma_crossover),
         'kalman_level': float(kalman_level) if kalman_level is not None else None,
@@ -537,6 +572,7 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
             'price_above_sma20': bool(price_above_sma20),
             'price_above_sma50': bool(price_above_sma50),
             'ema20_gt_ema50': bool(ema_signal),
+            'rsi_gte_50': bool(rsi_signal) if rsi_signal is not None else None,
             'ema20_slope_pos': ema20_slope > 0,
             'close_gt_kalman': bool(kalman_signal) if kalman_level is not None else None,
             'close_gt_vwap': bool(vwap_signal) if intraday else None,
