@@ -223,26 +223,111 @@ def apply_page_style() -> None:
         .predictor-card {
             background: #ffffff;
             border-radius: 18px;
-            padding: 1rem 1rem 0.6rem 1rem;
-            box-shadow: 0 12px 28px rgba(15, 23, 42, 0.08);
+            padding: 1rem 1rem 1rem 1rem;
+            box-shadow: 0 18px 38px rgba(15, 23, 42, 0.1);
             margin-bottom: 1rem;
-            border: 1px solid #dbeafe;
+            border: 1px solid rgba(191, 219, 254, 0.9);
+            overflow: hidden;
         }
         .predictor-card.up-card {
             border-top: 5px solid #16a34a;
-            background: linear-gradient(180deg, #ecfdf5 0%, #ffffff 32%);
+            background:
+                radial-gradient(circle at top right, rgba(34, 197, 94, 0.16), transparent 30%),
+                linear-gradient(180deg, #ecfdf5 0%, #ffffff 38%);
         }
         .predictor-card.down-card {
             border-top: 5px solid #dc2626;
-            background: linear-gradient(180deg, #fef2f2 0%, #ffffff 32%);
+            background:
+                radial-gradient(circle at top right, rgba(239, 68, 68, 0.16), transparent 30%),
+                linear-gradient(180deg, #fef2f2 0%, #ffffff 38%);
         }
         .predictor-card h3 {
             margin: 0 0 0.35rem 0;
-            font-size: 1.2rem;
+            font-size: 1.25rem;
+            font-weight: 800;
         }
         .predictor-card p {
             margin: 0 0 0.8rem 0;
             color: #475569;
+        }
+        .predictor-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            padding: 0.28rem 0.65rem;
+            border-radius: 999px;
+            font-size: 0.78rem;
+            font-weight: 800;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            margin-bottom: 0.75rem;
+        }
+        .predictor-card.up-card .predictor-badge {
+            background: rgba(22, 163, 74, 0.12);
+            color: #15803d;
+        }
+        .predictor-card.down-card .predictor-badge {
+            background: rgba(220, 38, 38, 0.12);
+            color: #b91c1c;
+        }
+        .predictor-table-wrapper {
+            width: 100%;
+            overflow-x: auto;
+            border-radius: 16px;
+        }
+        .predictor-table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+            overflow: hidden;
+            border-radius: 16px;
+        }
+        .predictor-table th,
+        .predictor-table td {
+            padding: 0.85rem 0.9rem;
+            text-align: center;
+            vertical-align: middle;
+        }
+        .predictor-table th {
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            font-size: 0.78rem;
+            font-weight: 800;
+        }
+        .predictor-table tr:last-child td {
+            border-bottom: none;
+        }
+        .predictor-table.up-table {
+            border: 1px solid rgba(22, 163, 74, 0.28);
+            box-shadow: 0 10px 22px rgba(34, 197, 94, 0.08);
+        }
+        .predictor-table.up-table th {
+            background: linear-gradient(180deg, #22c55e 0%, #16a34a 100%);
+            color: #f0fdf4;
+        }
+        .predictor-table.up-table td {
+            background: rgba(240, 253, 244, 0.95);
+            border-bottom: 1px solid rgba(22, 163, 74, 0.14);
+            color: #14532d;
+        }
+        .predictor-table.up-table tbody tr:nth-child(even) td {
+            background: rgba(220, 252, 231, 0.92);
+        }
+        .predictor-table.down-table {
+            border: 1px solid rgba(220, 38, 38, 0.24);
+            box-shadow: 0 10px 22px rgba(239, 68, 68, 0.08);
+        }
+        .predictor-table.down-table th {
+            background: linear-gradient(180deg, #ef4444 0%, #dc2626 100%);
+            color: #fef2f2;
+        }
+        .predictor-table.down-table td {
+            background: rgba(254, 242, 242, 0.96);
+            border-bottom: 1px solid rgba(220, 38, 38, 0.14);
+            color: #7f1d1d;
+        }
+        .predictor-table.down-table tbody tr:nth-child(even) td {
+            background: rgba(254, 226, 226, 0.92);
         }
         .sidebar-card {
             background: rgba(255, 255, 255, 0.08);
@@ -761,7 +846,7 @@ def render_prediction_results(prediction: dict) -> None:
     st.markdown(
         f"""
         <div class="dashboard-hero">
-            <h2>GitHub AI Stock Predictor - {INDEX_LABELS.get(prediction.get("index", DEFAULT_INDEX), prediction.get("index", DEFAULT_INDEX))}</h2>
+            <h2>AI Predictor - {INDEX_LABELS.get(prediction.get("index", DEFAULT_INDEX), prediction.get("index", DEFAULT_INDEX))}</h2>
             <p>Overall sentiment: {str(prediction.get("market_sentiment", "Unknown")).title()} | Source: {prediction.get("provider", "Unknown")}</p>
         </div>
         """,
@@ -775,7 +860,7 @@ def render_prediction_results(prediction: dict) -> None:
         if frame.empty:
             return frame
         frame["ticker"] = frame["ticker"].astype(str).str.replace(".NS", "", regex=False)
-        return frame.rename(
+        frame = frame.rename(
             columns={
                 "ticker": "Stock Name",
                 "rsi": "RSI",
@@ -784,21 +869,46 @@ def render_prediction_results(prediction: dict) -> None:
                 "volume_ratio": "Volume Ratio",
             }
         )
+        visible_columns = [column for column in ["Stock Name", "RSI", "Close Price", "Signal Strength", "Volume Ratio"] if column in frame.columns]
+        return frame[visible_columns]
+
+    def predictor_table_html(dataframe: pd.DataFrame, theme: str) -> str:
+        table_class = "up-table" if theme == "up" else "down-table"
+        headers = "".join(f"<th>{column}</th>" for column in dataframe.columns)
+        rows = []
+        for _, row in dataframe.iterrows():
+            formatted_values = []
+            for column, value in row.items():
+                if column in {"RSI", "Close Price", "Volume Ratio"} and isinstance(value, (int, float)):
+                    formatted_values.append(f"{value:.2f}")
+                else:
+                    formatted_values.append(value)
+            cells = "".join(f"<td>{value}</td>" for value in formatted_values)
+            rows.append(f"<tr>{cells}</tr>")
+        body = "".join(rows)
+        return (
+            '<div class="predictor-table-wrapper">'
+            f'<table class="predictor-table {table_class}">'
+            f"<thead><tr>{headers}</tr></thead>"
+            f"<tbody>{body}</tbody>"
+            "</table>"
+            "</div>"
+        )
 
     def themed_predictor_block(title: str, subtitle: str, dataframe: pd.DataFrame, theme: str) -> None:
         st.markdown(
             f"""
             <div class="predictor-card {'up-card' if theme == 'up' else 'down-card'}">
+                <div class="predictor-badge">{'Bullish Setup' if theme == 'up' else 'Bearish Setup'}</div>
                 <h3>{title}</h3>
                 <p>{subtitle}</p>
+                {predictor_table_html(dataframe, theme) if not dataframe.empty else ''}
             </div>
             """,
             unsafe_allow_html=True,
         )
         if dataframe.empty:
             st.info(f"No {theme}trend picks available.")
-        else:
-            st.dataframe(dataframe, use_container_width=True, hide_index=True)
 
     uptrend_frame = picks_to_frame(prediction.get("uptrend_picks", []))
     downtrend_frame = picks_to_frame(prediction.get("downtrend_picks", []))
@@ -853,7 +963,7 @@ def main() -> None:
             st.session_state["prediction_status"] = None
             st.session_state["prediction_result"] = None
 
-        st.header("GitHub AI Stock Predictor")
+        st.header("AI Predictor")
         predictor_index = st.selectbox(
             "Predictor Index",
             options=INDEX_OPTIONS,
@@ -863,7 +973,7 @@ def main() -> None:
         )
         github_token_configured = bool(get_runtime_setting("GITHUB_TOKEN"))
         sidebar_predictor_warning = None
-        if st.button("GitHub AI Stock Predict", use_container_width=True):
+        if st.button("Run AI Predictor", use_container_width=True):
             latest_status = st.session_state.get("latest_status")
             if not github_token_configured:
                 st.session_state["prediction_status"] = {
@@ -874,13 +984,13 @@ def main() -> None:
             elif not latest_status or latest_status.get("status") != "completed":
                 st.session_state["prediction_status"] = {
                     "status": "warning",
-                    "error_excerpt": "First refresh the data, then use GitHub AI Stock Predictor.",
+                    "error_excerpt": "First refresh the data, then use AI Predictor.",
                 }
                 sidebar_predictor_warning = st.session_state["prediction_status"]["error_excerpt"]
             elif latest_status.get("params", {}).get("index") != predictor_index:
                 st.session_state["prediction_status"] = {
                     "status": "warning",
-                    "error_excerpt": f"First refresh data for {INDEX_LABELS[predictor_index]}, then use GitHub AI Stock Predictor.",
+                    "error_excerpt": f"First refresh data for {INDEX_LABELS[predictor_index]}, then use AI Predictor.",
                 }
                 sidebar_predictor_warning = st.session_state["prediction_status"]["error_excerpt"]
             else:
@@ -912,9 +1022,9 @@ def main() -> None:
     prediction_status = st.session_state.get("prediction_status")
     if prediction_status and prediction_status.get("status") == "warning":
         if not prediction_result:
-            st.info("Use Refresh Data first, then run the GitHub AI Stock Predictor for the same selected index.")
+            st.info("Use Refresh Data first, then run AI Predictor for the same selected index.")
     elif prediction_status and prediction_status.get("status") == "failed":
-        st.error("GitHub AI stock prediction failed.")
+        st.error("AI prediction failed.")
         if prediction_status.get("error_excerpt"):
             st.code(str(prediction_status["error_excerpt"]))
     elif prediction_result:
