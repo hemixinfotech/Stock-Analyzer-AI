@@ -1,0 +1,67 @@
+{
+  "market_sentiment": "bullish",
+  "turning_bullish_picks": [
+    {
+      "ticker": "MARUTI.NS",
+      "trend": "turning_bullish",
+      "rsi": 61.162794841960306,
+      "close": 13745.0,
+      "turning_score": 4.0,
+      "signal_strength": 8,
+      "volume": 981556.0,
+      "avg_volume_20": 463871.15,
+      "volume_ratio": 2.1160100170058,
+      "buy_price": 13745.0,
+      "target_price": 14137.0,
+      "stop_loss": 13510.0
+    },
+    {
+      "ticker": "M&M.NS",
+      "trend": "turning_bullish",
+      "rsi": 59.74005059683101,
+      "close": 3182.199951171875,
+      "turning_score": 4.0,
+      "signal_strength": 6,
+      "volume": 5346892.0,
+      "avg_volume_20": 3658174.45,
+      "volume_ratio": 1.4616284906806454,
+      "buy_price": 3182.2,
+      "target_price": 3267.5,
+      "stop_loss": 3120.0
+    }
+  ],
+  "turning_bearish_picks": [
+    {
+      "ticker": "POWERGRID.NS",
+      "trend": "turning_bearish",
+      "rsi": 41.10224340581364,
+      "close": 283.8999938964844,
+      "turning_score": 4.0,
+      "signal_strength": 1,
+      "volume": 16305770.0,
+      "avg_volume_20": 14088149.8,
+      "volume_ratio": 1.157410322255375,
+      "buy_price": 283.9,
+      "target_price": 275.0,
+      "stop_loss": 288.5
+    },
+    {
+      "ticker": "BHARTIARTL.NS",
+      "trend": "turning_bearish",
+      "rsi": 49.74912796458889,
+      "close": 1850.699951171875,
+      "turning_score": 4.0,
+      "signal_strength": 4,
+      "volume": 8521503.0,
+      "avg_volume_20": 9386502.0,
+      "volume_ratio": 0.9078465012845041,
+      "buy_price": 1850.7,
+      "target_price": 1790.0,
+      "stop_loss": 1885.0
+    }
+  ],
+  "analysis": "The overall market sentiment is bullish, favoring bullish reversal setups. Among bullish candidates, MARUTI.NS shows the strongest volume ratio (2.11), high RSI (61.16), strong signal strength (8), and a solid percent change, making it the top bullish pick. M&M.NS is selected next due to its higher percent change (4.58%) and decent volume ratio (1.46) with good RSI (59.74). TATACONSUM.NS, despite being bullish, has lower signal strength and volume ratio compared to these two. For bearish picks, POWERGRID.NS is chosen despite low signal strength due to its volume ratio above 1 and RSI near 41 indicating weakening momentum. BHARTIARTL.NS is selected next as it shows a turning bearish trend with moderate signal strength and RSI near 50, though volume ratio is below 1, it still fits bearish reversal context. Stop losses and targets are set with realistic one-day risk-reward ratios considering price levels and volatility.",
+  "provider": "GitHub Models (openai/gpt-4.1-mini)",
+  "index": "nifty50",
+  "input_market_sentiment": "Bullish"
+}

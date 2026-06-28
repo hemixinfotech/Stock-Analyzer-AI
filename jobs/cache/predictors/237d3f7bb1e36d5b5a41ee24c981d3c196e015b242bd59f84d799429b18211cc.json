@@ -1,0 +1,63 @@
+{
+  "market_sentiment": "bullish",
+  "uptrend_picks": [
+    {
+      "ticker": "SHRIRAMFIN.NS",
+      "trend": "up",
+      "rsi": 68.05684434211564,
+      "close": 1031.800048828125,
+      "signal_strength": 6,
+      "volume": 8924791.0,
+      "avg_volume_20": 6179325.95,
+      "volume_ratio": 1.4442984675375474,
+      "buy_price": 1032,
+      "target_price": 1060,
+      "stop_loss": 1010
+    },
+    {
+      "ticker": "LT.NS",
+      "trend": "up",
+      "rsi": 67.49880544481732,
+      "close": 4216.39990234375,
+      "signal_strength": 7,
+      "volume": 3104020.0,
+      "avg_volume_20": 2104838.95,
+      "volume_ratio": 1.4747066515469032,
+      "buy_price": 4216,
+      "target_price": 4300,
+      "stop_loss": 4150
+    }
+  ],
+  "downtrend_picks": [
+    {
+      "ticker": "ONGC.NS",
+      "trend": "down",
+      "rsi": 19.772493253247234,
+      "close": 233.10000610351562,
+      "signal_strength": 0,
+      "volume": 36085563.0,
+      "avg_volume_20": 17412781.45,
+      "volume_ratio": 2.072360645174238,
+      "buy_price": 233,
+      "target_price": 220,
+      "stop_loss": 240
+    },
+    {
+      "ticker": "HINDALCO.NS",
+      "trend": "down",
+      "rsi": 30.915057931170907,
+      "close": 953.2000122070312,
+      "signal_strength": 0,
+      "volume": 12155741.0,
+      "avg_volume_20": 7186848.45,
+      "volume_ratio": 1.6913868553886091,
+      "buy_price": 953,
+      "target_price": 920,
+      "stop_loss": 970
+    }
+  ],
+  "analysis": "Given the bullish market sentiment, the uptrend picks prioritize stocks with strong volume ratios, high RSI near overbought levels but not extreme, and solid signal strength. SHRIRAMFIN.NS and LT.NS show the best combination of volume surge and momentum for continuation. For downtrend picks, despite the overall bullish sentiment, ONGC.NS and HINDALCO.NS exhibit very low RSI, significant negative percent changes, and high volume ratios indicating strong selling pressure and likelihood of continued decline. Stop losses and targets are set to maintain a reasonable risk-reward ratio for one-day trades.",
+  "provider": "GitHub Models (openai/gpt-4.1-mini)",
+  "index": "nifty50",
+  "input_market_sentiment": "Bullish"
+}

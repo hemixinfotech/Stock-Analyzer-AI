@@ -9,6 +9,7 @@ Data source: Fyers API (real-time, preferred) or yfinance (fallback)
 Dependencies: pandas, numpy, requests, yfinance, python-dotenv
 """
 import argparse
+import hashlib
 import json
 import time
 import os
@@ -44,10 +45,74 @@ FYERS_API_KEY = os.getenv('FYERS_API_KEY', '')
 FYERS_ACCESS_TOKEN = os.getenv('FYERS_ACCESS_TOKEN', '')
 FYERS_BASE_URL = 'https://api.fyers.in/api/v3'
 FYERS_QUOTE_URL = 'https://api.fyers.in/api/v3/quotes'
+REPO_ROOT = Path(__file__).resolve().parents[1]
+CACHE_DIR = REPO_ROOT / 'jobs' / 'cache'
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+
+def ist_now() -> datetime:
+    return datetime.now(timezone(timedelta(hours=5, minutes=30)))
+
+
+def is_market_hours(now=None) -> bool:
+    current = now or ist_now()
+    if current.weekday() >= 5:
+        return False
+    market_open = current.replace(hour=9, minute=15, second=0, microsecond=0)
+    market_close = current.replace(hour=15, minute=30, second=0, microsecond=0)
+    return market_open <= current <= market_close
+
+
+def build_cache_path(namespace, key, suffix):
+    namespace_dir = CACHE_DIR / namespace
+    namespace_dir.mkdir(parents=True, exist_ok=True)
+    hashed_key = hashlib.sha256(key.encode('utf-8')).hexdigest()
+    return namespace_dir / f'{hashed_key}.{suffix}'
+
+
+def cache_is_fresh(path, ttl_seconds):
+    if not path.exists():
+        return False
+    if ttl_seconds is None:
+        return True
+    age_seconds = time.time() - path.stat().st_mtime
+    return age_seconds <= ttl_seconds
+
+
+def read_json_cache(path):
+    with open(path, 'r', encoding='utf-8') as handle:
+        return json.load(handle)
+
+
+def write_json_cache(path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as handle:
+        json.dump(payload, handle)
+
+
+def read_pickle_cache(path):
+    return pd.read_pickle(path)
+
+
+def write_pickle_cache(path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.to_pickle(payload, path)
+
+
+def history_cache_ttl_seconds():
+    return 300 if is_market_hours() else 6 * 60 * 60
+
+
+def intraday_cache_ttl_seconds():
+    return 60 if is_market_hours() else 30 * 60
+
+
+def quote_cache_ttl_seconds():
+    return 0 if is_market_hours() else 10 * 60
 
 
 def get_constituents_from_wikipedia(index_name):
@@ -83,6 +148,15 @@ def get_constituents_from_wikipedia(index_name):
                 # if config file is malformed, continue to other methods
                 pass
 
+    cache_path = build_cache_path('constituents', index_key, 'json')
+    if cache_is_fresh(cache_path, 12 * 60 * 60):
+        try:
+            cached_symbols = read_json_cache(cache_path)
+            if isinstance(cached_symbols, list) and cached_symbols:
+                return cached_symbols
+        except Exception:
+            pass
+
     urls = {}
     # Prefer specific mid/smallcap detection before generic '100' rule
     if 'midcap' in index_key and '100' in index_key:
@@ -115,7 +189,9 @@ def get_constituents_from_wikipedia(index_name):
                         syms = t[c].astype(str).tolist()
                         syms = [s.strip().upper().replace('.NS', '') for s in syms if s and s != '–']
                         syms = [s + '.NS' for s in syms]
-                        return list(dict.fromkeys(syms))
+                        resolved = list(dict.fromkeys(syms))
+                        write_json_cache(cache_path, resolved)
+                        return resolved
     except Exception:
         # ignore and try NSE CSV fallback
         pass
@@ -141,13 +217,25 @@ def get_constituents_from_wikipedia(index_name):
                     syms = df[col].astype(str).tolist()
                     syms = [s.strip().upper().replace('.NS', '') for s in syms if s and s != '–']
                     syms = [s + '.NS' for s in syms]
-                    return list(dict.fromkeys(syms))
+                    resolved = list(dict.fromkeys(syms))
+                    write_json_cache(cache_path, resolved)
+                    return resolved
             # if CSV has a 'Security Name' and 'ISIN' etc, attempt common column
             if 'SYMBOL' in (c.upper() for c in df.columns):
                 syms = df['SYMBOL'].astype(str).tolist()
                 syms = [s.strip().upper().replace('.NS', '') for s in syms if s and s != '–']
                 syms = [s + '.NS' for s in syms]
-                return list(dict.fromkeys(syms))
+                resolved = list(dict.fromkeys(syms))
+                write_json_cache(cache_path, resolved)
+                return resolved
+        except Exception:
+            pass
+
+    if cache_path.exists():
+        try:
+            cached_symbols = read_json_cache(cache_path)
+            if isinstance(cached_symbols, list):
+                return cached_symbols
         except Exception:
             pass
 
@@ -226,6 +314,57 @@ def compute_rsi(series, period=14):
     return rsi
 
 
+def compute_macd(series, fast=12, slow=26, signal=9):
+    """Compute MACD line, signal line, and histogram."""
+    if series is None or len(series) == 0:
+        empty = pd.Series(dtype=float)
+        return empty, empty, empty
+    ema_fast = series.ewm(span=fast, adjust=False).mean()
+    ema_slow = series.ewm(span=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
+    return macd_line, signal_line, histogram
+
+
+def detect_order_block_rejection(df, direction, lookback=20):
+    """Heuristic supply/demand rejection detector using recent pivot zones."""
+    if df is None or df.empty or not {'Open', 'High', 'Low', 'Close'}.issubset(df.columns):
+        return False, None
+    recent = df.tail(max(lookback + 3, 8)).copy()
+    if len(recent) < 5:
+        return False, None
+
+    body = (recent['Close'] - recent['Open']).abs()
+    median_body = float(body.tail(lookback).median()) if not body.tail(lookback).empty else 0.0
+    threshold = median_body * 0.6 if median_body > 0 else 0.0
+
+    latest = recent.iloc[-1]
+    prior = recent.iloc[-2]
+    latest_range = float(latest['High'] - latest['Low']) or 1.0
+
+    if direction == 'bullish':
+        candidates = recent[(recent['Close'] < recent['Open']) & (body >= threshold)]
+        zone_price = float(candidates['Low'].tail(3).min()) if not candidates.empty else float(recent['Low'].tail(lookback).min())
+        touched_zone = float(latest['Low']) <= zone_price * 1.02 or float(prior['Low']) <= zone_price * 1.02
+        rejected = (
+            float(latest['Close']) > float(latest['Open']) and
+            float(latest['Close']) >= (float(latest['Low']) + latest_range * 0.6) and
+            float(latest['Close']) > float(prior['Close'])
+        )
+        return touched_zone and rejected, zone_price
+
+    candidates = recent[(recent['Close'] > recent['Open']) & (body >= threshold)]
+    zone_price = float(candidates['High'].tail(3).max()) if not candidates.empty else float(recent['High'].tail(lookback).max())
+    touched_zone = float(latest['High']) >= zone_price * 0.98 or float(prior['High']) >= zone_price * 0.98
+    rejected = (
+        float(latest['Close']) < float(latest['Open']) and
+        float(latest['Close']) <= (float(latest['High']) - latest_range * 0.6) and
+        float(latest['Close']) < float(prior['Close'])
+    )
+    return touched_zone and rejected, zone_price
+
+
 def supertrend(df, period=10, multiplier=3.0):
     """Compute SuperTrend and return (trend_series (True=up), final_upper, final_lower)
     Expects df to contain High, Low, Close columns.
@@ -280,6 +419,17 @@ def fetch_history_fyers(symbol, period_days=120):
     
     # Fyers API requires recent history (typically supports 1-5 years)
     # Use 'D' for daily candles
+    cache_key = f'{symbol}|{period_days}'
+    cache_path = build_cache_path('fyers_history', cache_key, 'pkl')
+    ttl_seconds = history_cache_ttl_seconds()
+    if cache_is_fresh(cache_path, ttl_seconds):
+        try:
+            cached_df = read_pickle_cache(cache_path)
+            if isinstance(cached_df, pd.DataFrame) and not cached_df.empty:
+                return cached_df
+        except Exception:
+            pass
+
     try:
         params = {
             'symbol': fyers_symbol,
@@ -306,9 +456,17 @@ def fetch_history_fyers(symbol, period_days=120):
         df = df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].copy()
         df.set_index('Date', inplace=True)
         df = df.sort_index()
-        return df.tail(period_days)  # return last N days
+        df = df.tail(period_days)
+        write_pickle_cache(cache_path, df)
+        return df
     except Exception as e:
-        # Silently fail and fall back to yfinance
+        if cache_path.exists():
+            try:
+                cached_df = read_pickle_cache(cache_path)
+                if isinstance(cached_df, pd.DataFrame) and not cached_df.empty:
+                    return cached_df
+            except Exception:
+                pass
         return None
 
 
@@ -322,6 +480,17 @@ def fetch_quote_fyers(symbol):
     
     fyers_symbol = symbol.replace('.NS', '-EQ')
     
+    cache_key = symbol
+    cache_path = build_cache_path('fyers_quote', cache_key, 'json')
+    ttl_seconds = quote_cache_ttl_seconds()
+    if ttl_seconds > 0 and cache_is_fresh(cache_path, ttl_seconds):
+        try:
+            cached_quote = read_json_cache(cache_path)
+            if isinstance(cached_quote, dict) and cached_quote.get('close') is not None:
+                return cached_quote
+        except Exception:
+            pass
+
     try:
         params = {
             'symbols': fyers_symbol
@@ -338,7 +507,7 @@ def fetch_quote_fyers(symbol):
             return None
         
         quote = data['d'][0]  # First symbol's quote
-        return {
+        quote_payload = {
             'close': quote.get('c'),
             'high': quote.get('h'),
             'low': quote.get('l'),
@@ -346,13 +515,25 @@ def fetch_quote_fyers(symbol):
             'volume': quote.get('v'),
             'timestamp': quote.get('tm')
         }
+        write_json_cache(cache_path, quote_payload)
+        return quote_payload
     except Exception as e:
+        if cache_is_fresh(cache_path, 5 * 60):
+            try:
+                cached_quote = read_json_cache(cache_path)
+                if isinstance(cached_quote, dict):
+                    return cached_quote
+            except Exception:
+                pass
         return None
 
 
 def fetch_history_yf(ticker, period_days=120):
     """Fetch historical data. Priority: Fyers API -> yfinance"""
-    
+    cache_key = f'{ticker}|{period_days}'
+    cache_path = build_cache_path('yf_history', cache_key, 'pkl')
+    ttl_seconds = history_cache_ttl_seconds()
+     
     # Try Fyers first if credentials are available
     if FYERS_ACCESS_TOKEN and FYERS_API_KEY:
         try:
@@ -361,7 +542,15 @@ def fetch_history_yf(ticker, period_days=120):
                 return df
         except Exception:
             pass
-    
+
+    if cache_is_fresh(cache_path, ttl_seconds):
+        try:
+            cached_df = read_pickle_cache(cache_path)
+            if isinstance(cached_df, pd.DataFrame) and not cached_df.empty:
+                return cached_df
+        except Exception:
+            pass
+     
     # Fallback to yfinance
     if yf is None:
         raise RuntimeError('yfinance is required but not installed (Fyers not configured)')
@@ -371,6 +560,48 @@ def fetch_history_yf(ticker, period_days=120):
         df = yf.download(ticker, period=period, progress=False, threads=False)
     except Exception:
         df = pd.DataFrame()
+    if df is not None and not df.empty:
+        write_pickle_cache(cache_path, df)
+        return df
+    if cache_path.exists():
+        try:
+            cached_df = read_pickle_cache(cache_path)
+            if isinstance(cached_df, pd.DataFrame):
+                return cached_df
+        except Exception:
+            pass
+    return df
+
+
+def fetch_intraday_yf(ticker, interval):
+    cache_key = f'{ticker}|{interval}'
+    cache_path = build_cache_path('yf_intraday', cache_key, 'pkl')
+    ttl_seconds = intraday_cache_ttl_seconds()
+    if cache_is_fresh(cache_path, ttl_seconds):
+        try:
+            cached_df = read_pickle_cache(cache_path)
+            if isinstance(cached_df, pd.DataFrame) and not cached_df.empty:
+                return cached_df
+        except Exception:
+            pass
+
+    if yf is None:
+        return pd.DataFrame()
+
+    try:
+        df = yf.download(ticker, period='1d', interval=interval, progress=False, threads=False)
+    except Exception:
+        df = pd.DataFrame()
+    if df is not None and not df.empty:
+        write_pickle_cache(cache_path, df)
+        return df
+    if cache_path.exists():
+        try:
+            cached_df = read_pickle_cache(cache_path)
+            if isinstance(cached_df, pd.DataFrame):
+                return cached_df
+        except Exception:
+            pass
     return df
 
 
@@ -416,32 +647,49 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
 
     rsi_series = compute_rsi(close)
     rsi_value = float(rsi_series.iloc[-1]) if not rsi_series.dropna().empty else None
+    prev_rsi = float(rsi_series.iloc[-2]) if len(rsi_series.dropna()) >= 2 else None
     latest_volume = float(volume.iloc[-1]) if not volume.empty else None
     avg_volume_20 = float(volume.tail(20).mean()) if not volume.empty else None
     volume_ratio = (latest_volume / avg_volume_20) if latest_volume is not None and avg_volume_20 not in (None, 0) else None
 
+    macd_line, macd_signal_line, macd_histogram = compute_macd(close)
+    macd_value = float(macd_line.iloc[-1]) if not macd_line.dropna().empty else None
+    macd_signal_value = float(macd_signal_line.iloc[-1]) if not macd_signal_line.dropna().empty else None
+    macd_hist_value = float(macd_histogram.iloc[-1]) if not macd_histogram.dropna().empty else None
+    prev_macd_value = float(macd_line.iloc[-2]) if len(macd_line.dropna()) >= 2 else None
+    prev_macd_signal_value = float(macd_signal_line.iloc[-2]) if len(macd_signal_line.dropna()) >= 2 else None
+    prev_macd_hist_value = float(macd_histogram.iloc[-2]) if len(macd_histogram.dropna()) >= 2 else None
+
     # Kalman smoothing
     kalman_vals = simple_kalman(close.ffill())
     kalman_level = float(kalman_vals[-1]) if kalman_vals.size > 0 else None
+    prev_kalman_level = float(kalman_vals[-2]) if kalman_vals.size > 1 else kalman_level
 
     # Try to get real-time quote from Fyers first
     latest_close = float(close.iloc[-1])
+    prev_close = float(close.iloc[-2]) if len(close) > 1 else latest_close
     fyers_quote = fetch_quote_fyers(ticker)
     if fyers_quote and fyers_quote.get('close'):
         latest_close = float(fyers_quote['close'])  # Override with real-time price
+    lookback_index = max(0, len(close) - min(max(int(lookback_days), 1), len(close)))
+    lookback_close = float(close.iloc[lookback_index])
+    percent_change = ((latest_close - lookback_close) / lookback_close * 100.0) if lookback_close else None
 
     # VWAP (intraday)
     vwap_latest = None
     if intraday:
         if yf is not None:
             try:
-                intr = yf.download(ticker, period='1d', interval=vwap_resolution, progress=False, threads=False)
+                intr = fetch_intraday_yf(ticker, vwap_resolution)
                 if not intr.empty:
                     vwap_sr = compute_vwap(intr)
                     if vwap_sr is not None and not vwap_sr.empty:
                         vwap_latest = float(vwap_sr.iloc[-1])
             except Exception:
                 vwap_latest = None
+
+    bullish_ob_rejection, bullish_order_block = detect_order_block_rejection(hist, 'bullish')
+    bearish_ob_rejection, bearish_order_block = detect_order_block_rejection(hist, 'bearish')
 
     # SuperTrend (daily) — uses lookback portion of history
     st_trend = None
@@ -485,6 +733,84 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
             vwap_signal = None
         else:
             vwap_signal = latest_close > vwap_latest
+    bearish_vwap_signal = None if vwap_signal is None else not vwap_signal
+    volume_bullish = volume_ratio is not None and volume_ratio >= 0.9 and latest_close >= prev_close
+    volume_bearish = volume_ratio is not None and volume_ratio >= 0.9 and latest_close <= prev_close
+
+    macd_bullish = (
+        macd_value is not None and
+        macd_signal_value is not None and
+        (
+            (prev_macd_value is not None and prev_macd_signal_value is not None and prev_macd_value <= prev_macd_signal_value and macd_value > macd_signal_value) or
+            (prev_macd_hist_value is not None and macd_hist_value is not None and macd_hist_value > prev_macd_hist_value)
+        )
+    )
+    macd_bearish = (
+        macd_value is not None and
+        macd_signal_value is not None and
+        (
+            (prev_macd_value is not None and prev_macd_signal_value is not None and prev_macd_value >= prev_macd_signal_value and macd_value < macd_signal_value) or
+            (prev_macd_hist_value is not None and macd_hist_value is not None and macd_hist_value < prev_macd_hist_value)
+        )
+    )
+    rsi_turning_bullish = rsi_value is not None and (
+        (prev_rsi is not None and prev_rsi < 30.0 and rsi_value > prev_rsi) or
+        (prev_rsi is not None and prev_rsi <= 50.0 and rsi_value > 50.0)
+    )
+    rsi_turning_bearish = rsi_value is not None and (
+        (prev_rsi is not None and prev_rsi > 70.0 and rsi_value < prev_rsi) or
+        (prev_rsi is not None and prev_rsi >= 50.0 and rsi_value < 50.0)
+    )
+    kalman_turning_bullish = (
+        kalman_level is not None and
+        prev_kalman_level is not None and
+        latest_close > kalman_level and
+        prev_close <= prev_kalman_level
+    )
+    kalman_turning_bearish = (
+        kalman_level is not None and
+        prev_kalman_level is not None and
+        latest_close < kalman_level and
+        prev_close >= prev_kalman_level
+    )
+
+    turning_bullish_conditions = {
+        'order_block_rejection': bullish_ob_rejection,
+        'close_holds_above_kalman': kalman_turning_bullish,
+        'close_recovers_above_vwap': bool(vwap_signal) if vwap_signal is not None else False,
+        'macd_bullish': macd_bullish,
+        'rsi_recovering': rsi_turning_bullish,
+        'volume_confirming': volume_bullish,
+    }
+    turning_bearish_conditions = {
+        'order_block_rejection': bearish_ob_rejection,
+        'close_holds_below_kalman': kalman_turning_bearish,
+        'close_capped_below_vwap': bool(bearish_vwap_signal) if bearish_vwap_signal is not None else False,
+        'macd_bearish': macd_bearish,
+        'rsi_fading': rsi_turning_bearish,
+        'volume_confirming': volume_bearish,
+    }
+    turning_bullish_available = {key: value for key, value in turning_bullish_conditions.items() if key != 'close_recovers_above_vwap' or intraday}
+    turning_bearish_available = {key: value for key, value in turning_bearish_conditions.items() if key != 'close_capped_below_vwap' or intraday}
+    turning_bullish_count = sum(1 for value in turning_bullish_available.values() if value)
+    turning_bearish_count = sum(1 for value in turning_bearish_available.values() if value)
+    turning_bullish_threshold = 4 if len(turning_bullish_available) >= 5 else max(3, len(turning_bullish_available))
+    turning_bearish_threshold = 4 if len(turning_bearish_available) >= 5 else max(3, len(turning_bearish_available))
+    turning_bullish = turning_bullish_count >= turning_bullish_threshold
+    turning_bearish = turning_bearish_count >= turning_bearish_threshold
+
+    bearish_context = (
+        (prev_rsi is not None and prev_rsi < 50.0) or
+        (prev_close <= float(ema20_series.iloc[-2]) if len(ema20_series) > 1 else False) or
+        (prev_macd_value is not None and prev_macd_signal_value is not None and prev_macd_value <= prev_macd_signal_value)
+    )
+    bullish_context = (
+        (prev_rsi is not None and prev_rsi > 50.0) or
+        (prev_close >= float(ema20_series.iloc[-2]) if len(ema20_series) > 1 else False) or
+        (prev_macd_value is not None and prev_macd_signal_value is not None and prev_macd_value >= prev_macd_signal_value)
+    )
+    turning_bullish = turning_bullish and bearish_context
+    turning_bearish = turning_bearish and bullish_context
 
     # Strong trend detection using prioritized rules
     strong_up = False
@@ -529,11 +855,18 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
 
     uptrend = False
     downtrend = False
+    trend = 'neutral'
     # prioritize strong flags
-    if strong_up:
+    if turning_bullish and not turning_bearish:
+        trend = 'turning_bullish'
+    elif turning_bearish and not turning_bullish:
+        trend = 'turning_bearish'
+    elif strong_up:
         uptrend = True
+        trend = 'up'
     elif strong_down:
         downtrend = True
+        trend = 'down'
     else:
         if signals:
             if vote_mode == 'strict':
@@ -547,15 +880,22 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
                 needed = (len(signals) // 2) + 1
                 uptrend = true_count >= needed
                 downtrend = (len(signals) - true_count) >= needed
+        if uptrend:
+            trend = 'up'
+        elif downtrend:
+            trend = 'down'
 
     return {
         'ticker': ticker,
         'close': latest_close,
+        'lookback_close': lookback_close,
+        'percent_change': percent_change,
         'ema20': float(ema20),
         'ema50': float(ema50),
         'sma20': float(sma20),
         'sma50': float(sma50),
         'rsi': rsi_value,
+        'rsi_prev': prev_rsi,
         'volume': latest_volume,
         'avg_volume_20': avg_volume_20,
         'volume_ratio': volume_ratio,
@@ -563,10 +903,17 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
         'ma_crossover': bool(ma_crossover),
         'kalman_level': float(kalman_level) if kalman_level is not None else None,
         'vwap': vwap_latest,
+        'macd': macd_value,
+        'macd_signal': macd_signal_value,
+        'macd_histogram': macd_hist_value,
         'supertrend_up': st_trend,
         'supertrend_ub': st_ub,
         'supertrend_lb': st_lb,
         'price_action_bullish': pa_bull,
+        'bullish_order_block': bullish_order_block,
+        'bearish_order_block': bearish_order_block,
+        'turning_bullish_score': turning_bullish_count,
+        'turning_bearish_score': turning_bearish_count,
         'signals': {
             'ma_crossover_sma20_gt_sma50': bool(ma_crossover),
             'price_above_sma20': bool(price_above_sma20),
@@ -577,9 +924,13 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
             'close_gt_kalman': bool(kalman_signal) if kalman_level is not None else None,
             'close_gt_vwap': bool(vwap_signal) if intraday else None,
             'supertrend_up': bool(st_trend) if st_trend is not None else None,
-            'price_action_bullish': bool(pa_bull) if pa_bull is not None else None
+            'price_action_bullish': bool(pa_bull) if pa_bull is not None else None,
+            'turning_bullish': turning_bullish,
+            'turning_bearish': turning_bearish,
+            'turning_bullish_conditions': turning_bullish_conditions,
+            'turning_bearish_conditions': turning_bearish_conditions,
         },
-        'trend': 'up' if uptrend else ('down' if downtrend else 'neutral')
+        'trend': trend
     }
 
 
@@ -620,7 +971,6 @@ def main(argv=None):
             continue
 
         for s in syms:
-            time.sleep(0.1)  # tiny throttle
             try:
                 item = evaluate_ticker(
                     s,
@@ -641,8 +991,8 @@ def main(argv=None):
 
     # market summary
     total = len([r for r in records if 'trend' in r])
-    up = len([r for r in records if r.get('trend') == 'up'])
-    down = len([r for r in records if r.get('trend') == 'down'])
+    up = len([r for r in records if r.get('trend') in ('up', 'turning_bullish')])
+    down = len([r for r in records if r.get('trend') in ('down', 'turning_bearish')])
     percent_up = (up / total) if total else None
     percent_down = (down / total) if total else None
 

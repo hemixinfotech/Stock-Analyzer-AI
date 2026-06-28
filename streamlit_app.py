@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 import sys
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
@@ -19,6 +20,7 @@ except Exception:
 
 JOBS_DIR = REPO_ROOT / "jobs"
 LATEST_JOB_DIR = JOBS_DIR / "latest"
+PREDICTOR_CACHE_DIR = JOBS_DIR / "cache" / "predictors"
 INDEX_LABELS = {
     "nifty50": "Nifty 50",
     "nifty_midcap_100": "Nifty Midcap 100",
@@ -26,6 +28,14 @@ INDEX_LABELS = {
 }
 INDEX_OPTIONS = list(INDEX_LABELS.keys())
 DEFAULT_INDEX = "nifty50"
+BULLISH_TRENDS = {"up", "turning_bullish"}
+BEARISH_TRENDS = {"down", "turning_bearish"}
+TREND_PRIORITY = {
+    "Turning Bullish": 0,
+    "Up": 1,
+    "Turning Bearish": 0,
+    "Down": 1,
+}
 
 
 def apply_page_style() -> None:
@@ -475,10 +485,10 @@ def get_project_python() -> str:
     return sys.executable
 
 
-def clear_jobs_dir() -> None:
-    if not JOBS_DIR.exists():
+def clear_latest_job_dir() -> None:
+    if not LATEST_JOB_DIR.exists():
         return
-    for child in JOBS_DIR.iterdir():
+    for child in LATEST_JOB_DIR.iterdir():
         if child.is_dir():
             shutil.rmtree(child)
         else:
@@ -534,8 +544,8 @@ def sanitize_index_name(index_name: str) -> str:
 
 def build_index_summary(records: list[dict]) -> dict:
     total = len([record for record in records if "trend" in record])
-    up = len([record for record in records if record.get("trend") == "up"])
-    down = len([record for record in records if record.get("trend") == "down"])
+    up = len([record for record in records if record.get("trend") in BULLISH_TRENDS])
+    down = len([record for record in records if record.get("trend") in BEARISH_TRENDS])
     percent_up = (up / total) if total else None
     percent_down = (down / total) if total else None
     market_trend = "neutral"
@@ -594,7 +604,7 @@ def run_command(
 
 
 def refresh_trend_data(index_name: str, lookback: int, intraday: bool) -> dict:
-    clear_jobs_dir()
+    clear_latest_job_dir()
     LATEST_JOB_DIR.mkdir(parents=True, exist_ok=True)
 
     output_json = LATEST_JOB_DIR / "results_nifty_trend.json"
@@ -710,6 +720,65 @@ def get_index_report_path_from_status(status_payload: dict, index_name: str) -> 
 
 
 def run_openai_predictor(index_name: str, status_payload: dict) -> dict:
+    return run_ai_predictor(index_name, status_payload, predictor_mode="all")
+
+
+def compute_file_hash(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def normalize_cache_number(value: object) -> object:
+    if isinstance(value, float):
+        return round(value, 4)
+    return value
+
+
+def build_predictor_cache_fingerprint(index_name: str, payload: dict, predictor_mode: str) -> str:
+    summary = payload.get("summary", {}) if isinstance(payload, dict) else {}
+    records = payload.get("records", []) if isinstance(payload, dict) else []
+    if predictor_mode == "turning":
+        allowed_trends = {"turning_bullish", "turning_bearish"}
+        selected_fields = [
+            "ticker", "trend", "close", "rsi", "percent_change", "volume",
+            "avg_volume_20", "volume_ratio", "turning_bullish_score", "turning_bearish_score",
+        ]
+    else:
+        allowed_trends = {"up", "down"}
+        selected_fields = [
+            "ticker", "trend", "close", "rsi", "percent_change", "volume",
+            "avg_volume_20", "volume_ratio", "ema20_slope", "ma_crossover",
+        ]
+
+    filtered_records = []
+    for record in records:
+        if not isinstance(record, dict) or record.get("trend") not in allowed_trends:
+            continue
+        filtered_record = {}
+        for field in selected_fields:
+            if field in record:
+                filtered_record[field] = normalize_cache_number(record.get(field))
+        filtered_records.append(filtered_record)
+
+    filtered_records.sort(key=lambda item: (str(item.get("ticker", "")), str(item.get("trend", ""))))
+    fingerprint_payload = {
+        "index": sanitize_index_name(index_name),
+        "predictor_mode": predictor_mode,
+        "market_trend": summary.get("market_trend"),
+        "records": filtered_records,
+    }
+    return hashlib.sha256(json.dumps(fingerprint_payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def get_predictor_cache_paths(index_name: str, predictor_mode: str, fingerprint: str) -> tuple[Path, Path]:
+    cache_key = hashlib.sha256(f"{sanitize_index_name(index_name)}|{predictor_mode}|{fingerprint}".encode("utf-8")).hexdigest()
+    PREDICTOR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    return (
+        PREDICTOR_CACHE_DIR / f"{cache_key}.json",
+        PREDICTOR_CACHE_DIR / f"{cache_key}.meta.json",
+    )
+
+
+def run_ai_predictor(index_name: str, status_payload: dict, predictor_mode: str = "all") -> dict:
     payload = load_index_payload_from_status(status_payload, index_name)
     if payload is None:
         raise ValueError(f"Refreshed data is unavailable for {index_name}. Please refresh the data first.")
@@ -718,9 +787,21 @@ def run_openai_predictor(index_name: str, status_payload: dict) -> dict:
     if report_path is None:
         raise ValueError(f"Refreshed report file is unavailable for {index_name}. Please refresh the data first.")
 
-    output_path = LATEST_JOB_DIR / f"prediction_{sanitize_index_name(index_name)}.json"
-    predictor_stdout = LATEST_JOB_DIR / "predictor.stdout.log"
-    predictor_stderr = LATEST_JOB_DIR / "predictor.stderr.log"
+    report_hash = compute_file_hash(report_path)
+    predictor_fingerprint = build_predictor_cache_fingerprint(index_name, payload, predictor_mode)
+    output_path = LATEST_JOB_DIR / f"prediction_{sanitize_index_name(index_name)}_{predictor_mode}.json"
+    predictor_stdout = LATEST_JOB_DIR / f"predictor_{predictor_mode}.stdout.log"
+    predictor_stderr = LATEST_JOB_DIR / f"predictor_{predictor_mode}.stderr.log"
+    cache_output_path, cache_meta_path = get_predictor_cache_paths(index_name, predictor_mode, predictor_fingerprint)
+    if cache_output_path.exists() and cache_meta_path.exists():
+        try:
+            cache_meta = load_json(cache_meta_path)
+            if cache_meta.get("predictor_fingerprint") == predictor_fingerprint:
+                cached_result = load_json(cache_output_path)
+                write_json(output_path, cached_result)
+                return cached_result
+        except Exception:
+            pass
     predictor_cmd = [
         get_project_python(),
         str(REPO_ROOT / "scripts" / "github_stock_predictor.py"),
@@ -728,6 +809,8 @@ def run_openai_predictor(index_name: str, status_payload: dict) -> dict:
         str(report_path),
         "--index",
         index_name,
+        "--mode",
+        predictor_mode,
         "--out",
         str(output_path),
     ]
@@ -736,7 +819,16 @@ def run_openai_predictor(index_name: str, status_payload: dict) -> dict:
         raise ValueError((predictor_result.stderr or predictor_result.stdout or "OpenAI predictor failed.").strip())
     if not output_path.exists():
         raise ValueError("GitHub Models predictor did not create an output file.")
-    return load_json(output_path)
+    prediction_payload = load_json(output_path)
+    write_json(cache_output_path, prediction_payload)
+    write_json(cache_meta_path, {
+        "report_hash": report_hash,
+        "predictor_fingerprint": predictor_fingerprint,
+        "index_name": index_name,
+        "predictor_mode": predictor_mode,
+        "updated_at": utc_now(),
+    })
+    return prediction_payload
 
 
 def render_summary(summary: dict) -> None:
@@ -759,8 +851,8 @@ def render_index_result(title: str, payload: dict) -> None:
     if "ticker" in frame.columns:
         frame["stock_name"] = frame["ticker"].astype(str).str.replace(".NS", "", regex=False)
     if "trend" in frame.columns:
-        frame["trend direction"] = frame["trend"].astype(str).str.title()
-    visible_columns = [column for column in ["stock_name", "trend direction", "close", "rsi"] if column in frame.columns]
+        frame["trend direction"] = frame["trend"].astype(str).str.replace("_", " ").str.title()
+    visible_columns = [column for column in ["stock_name", "trend direction", "close", "percent_change", "rsi"] if column in frame.columns]
     display_frame = frame[visible_columns] if visible_columns else frame
 
     if "stock_name" in display_frame.columns:
@@ -769,17 +861,38 @@ def render_index_result(title: str, payload: dict) -> None:
                 "stock_name": "Stock Name",
                 "trend direction": "Trend Direction",
                 "close": "Close Price",
+                "percent_change": "% Change",
                 "rsi": "RSI",
             }
         )
 
-    uptrend_frame = display_frame[display_frame["Trend Direction"] == "Up"] if "Trend Direction" in display_frame.columns else pd.DataFrame()
-    downtrend_frame = display_frame[display_frame["Trend Direction"] == "Down"] if "Trend Direction" in display_frame.columns else pd.DataFrame()
+    uptrend_frame = (
+        display_frame[display_frame["Trend Direction"].isin(["Up", "Turning Bullish"])]
+        if "Trend Direction" in display_frame.columns else pd.DataFrame()
+    )
+    downtrend_frame = (
+        display_frame[display_frame["Trend Direction"].isin(["Down", "Turning Bearish"])]
+        if "Trend Direction" in display_frame.columns else pd.DataFrame()
+    )
+
+    if "Trend Direction" in uptrend_frame.columns:
+        uptrend_frame = uptrend_frame.assign(_priority=uptrend_frame["Trend Direction"].map(TREND_PRIORITY).fillna(99))
+    if "Trend Direction" in downtrend_frame.columns:
+        downtrend_frame = downtrend_frame.assign(_priority=downtrend_frame["Trend Direction"].map(TREND_PRIORITY).fillna(99))
 
     if "RSI" in uptrend_frame.columns:
-        uptrend_frame = uptrend_frame.sort_values(by="RSI", ascending=False, na_position="last")
+        uptrend_frame = uptrend_frame.sort_values(by=["_priority", "RSI"], ascending=[True, False], na_position="last")
+    elif "_priority" in uptrend_frame.columns:
+        uptrend_frame = uptrend_frame.sort_values(by="_priority", ascending=True, na_position="last")
     if "RSI" in downtrend_frame.columns:
-        downtrend_frame = downtrend_frame.sort_values(by="RSI", ascending=True, na_position="last")
+        downtrend_frame = downtrend_frame.sort_values(by=["_priority", "RSI"], ascending=[True, True], na_position="last")
+    elif "_priority" in downtrend_frame.columns:
+        downtrend_frame = downtrend_frame.sort_values(by="_priority", ascending=True, na_position="last")
+
+    if "_priority" in uptrend_frame.columns:
+        uptrend_frame = uptrend_frame.drop(columns=["_priority"])
+    if "_priority" in downtrend_frame.columns:
+        downtrend_frame = downtrend_frame.drop(columns=["_priority"])
 
     def themed_table_html(dataframe: pd.DataFrame, theme: str):
         table_class = "up-table" if theme == "up" else "down-table"
@@ -788,7 +901,7 @@ def render_index_result(title: str, payload: dict) -> None:
         for _, row in dataframe.iterrows():
             formatted_values = []
             for column, value in row.items():
-                if column in {"Close Price", "RSI"} and isinstance(value, (int, float)):
+                if column in {"Close Price", "RSI", "% Change"} and isinstance(value, (int, float)):
                     formatted_values.append(f"{value:.2f}")
                 else:
                     formatted_values.append(value)
@@ -860,16 +973,28 @@ def render_prediction_results(prediction: dict) -> None:
         if frame.empty:
             return frame
         frame["ticker"] = frame["ticker"].astype(str).str.replace(".NS", "", regex=False)
+        if "trend" in frame.columns:
+            frame["trend"] = frame["trend"].astype(str).str.replace("_", " ").str.title()
         frame = frame.rename(
             columns={
                 "ticker": "Stock Name",
+                "trend": "Trend Direction",
                 "rsi": "RSI",
                 "close": "Close Price",
+                "buy_price": "Buy Price",
+                "target_price": "Target",
+                "stop_loss": "Stop Loss",
                 "signal_strength": "Signal Strength",
+                "turning_score": "Turning Score",
                 "volume_ratio": "Volume Ratio",
             }
         )
-        visible_columns = [column for column in ["Stock Name", "RSI", "Close Price", "Signal Strength", "Volume Ratio"] if column in frame.columns]
+        visible_columns = [
+            column for column in [
+                "Stock Name", "Trend Direction", "RSI", "Close Price", "Buy Price",
+                "Target", "Stop Loss", "Turning Score", "Signal Strength", "Volume Ratio"
+            ] if column in frame.columns
+        ]
         return frame[visible_columns]
 
     def predictor_table_html(dataframe: pd.DataFrame, theme: str) -> str:
@@ -879,7 +1004,7 @@ def render_prediction_results(prediction: dict) -> None:
         for _, row in dataframe.iterrows():
             formatted_values = []
             for column, value in row.items():
-                if column in {"RSI", "Close Price", "Volume Ratio"} and isinstance(value, (int, float)):
+                if column in {"RSI", "Close Price", "Buy Price", "Target", "Stop Loss", "Volume Ratio"} and isinstance(value, (int, float)):
                     formatted_values.append(f"{value:.2f}")
                 else:
                     formatted_values.append(value)
@@ -912,17 +1037,110 @@ def render_prediction_results(prediction: dict) -> None:
 
     uptrend_frame = picks_to_frame(prediction.get("uptrend_picks", []))
     downtrend_frame = picks_to_frame(prediction.get("downtrend_picks", []))
-
     themed_predictor_block(
         "AI Uptrend Picks",
-        "Top bullish continuation candidates for the selected refreshed index.",
+        "Top bullish continuation candidates with buy, target, and stop-loss levels.",
         uptrend_frame,
         "up",
     )
     themed_predictor_block(
         "AI Downtrend Picks",
-        "Top bearish continuation candidates for the selected refreshed index.",
+        "Top bearish continuation candidates with buy, target, and stop-loss levels.",
         downtrend_frame,
+        "down",
+    )
+
+
+def render_turning_prediction_results(prediction: dict) -> None:
+    st.markdown(
+        f"""
+        <div class="dashboard-hero">
+            <h2>AI Turning Predictor - {INDEX_LABELS.get(prediction.get("index", DEFAULT_INDEX), prediction.get("index", DEFAULT_INDEX))}</h2>
+            <p>Turning bullish and turning bearish setups only | Source: {prediction.get("provider", "Unknown")}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if prediction.get("analysis"):
+        st.info(str(prediction["analysis"]))
+
+    def picks_to_frame(picks: list[dict]) -> pd.DataFrame:
+        frame = pd.DataFrame(picks)
+        if frame.empty:
+            return frame
+        frame["ticker"] = frame["ticker"].astype(str).str.replace(".NS", "", regex=False)
+        if "trend" in frame.columns:
+            frame["trend"] = frame["trend"].astype(str).str.replace("_", " ").str.title()
+        frame = frame.rename(
+            columns={
+                "ticker": "Stock Name",
+                "trend": "Trend Direction",
+                "rsi": "RSI",
+                "close": "Close Price",
+                "buy_price": "Buy Price",
+                "target_price": "Target",
+                "stop_loss": "Stop Loss",
+                "turning_score": "Turning Score",
+                "signal_strength": "Signal Strength",
+                "volume_ratio": "Volume Ratio",
+            }
+        )
+        visible_columns = [
+            column for column in [
+                "Stock Name", "Trend Direction", "RSI", "Close Price", "Buy Price",
+                "Target", "Stop Loss", "Turning Score", "Signal Strength", "Volume Ratio"
+            ] if column in frame.columns
+        ]
+        return frame[visible_columns]
+
+    def predictor_table_html(dataframe: pd.DataFrame, theme: str) -> str:
+        table_class = "up-table" if theme == "up" else "down-table"
+        headers = "".join(f"<th>{column}</th>" for column in dataframe.columns)
+        rows = []
+        for _, row in dataframe.iterrows():
+            formatted_values = []
+            for column, value in row.items():
+                if column in {"RSI", "Close Price", "Buy Price", "Target", "Stop Loss", "Volume Ratio"} and isinstance(value, (int, float)):
+                    formatted_values.append(f"{value:.2f}")
+                else:
+                    formatted_values.append(value)
+            cells = "".join(f"<td>{value}</td>" for value in formatted_values)
+            rows.append(f"<tr>{cells}</tr>")
+        body = "".join(rows)
+        return (
+            '<div class="predictor-table-wrapper">'
+            f'<table class="predictor-table {table_class}">'
+            f"<thead><tr>{headers}</tr></thead>"
+            f"<tbody>{body}</tbody>"
+            "</table>"
+            "</div>"
+        )
+
+    def themed_predictor_block(title: str, subtitle: str, dataframe: pd.DataFrame, theme: str) -> None:
+        st.markdown(
+            f"""
+            <div class="predictor-card {'up-card' if theme == 'up' else 'down-card'}">
+                <div class="predictor-badge">{'Bullish Reversal' if theme == 'up' else 'Bearish Reversal'}</div>
+                <h3>{title}</h3>
+                <p>{subtitle}</p>
+                {predictor_table_html(dataframe, theme) if not dataframe.empty else ''}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if dataframe.empty:
+            st.info(f"No turning {'bullish' if theme == 'up' else 'bearish'} picks available.")
+
+    themed_predictor_block(
+        "AI Turning Bullish Picks",
+        "Top bullish reversal candidates with buy, target, and stop-loss levels.",
+        picks_to_frame(prediction.get("turning_bullish_picks", [])),
+        "up",
+    )
+    themed_predictor_block(
+        "AI Turning Bearish Picks",
+        "Top bearish reversal candidates with buy, target, and stop-loss levels.",
+        picks_to_frame(prediction.get("turning_bearish_picks", [])),
         "down",
     )
 
@@ -946,6 +1164,10 @@ def main() -> None:
         st.session_state["prediction_status"] = None
     if "prediction_result" not in st.session_state:
         st.session_state["prediction_result"] = None
+    if "turning_prediction_status" not in st.session_state:
+        st.session_state["turning_prediction_status"] = None
+    if "turning_prediction_result" not in st.session_state:
+        st.session_state["turning_prediction_result"] = None
 
     with st.sidebar:
         st.header("Refresh Settings")
@@ -962,6 +1184,8 @@ def main() -> None:
             st.session_state["latest_status"] = refresh_trend_data(selected_index, int(lookback), intraday)
             st.session_state["prediction_status"] = None
             st.session_state["prediction_result"] = None
+            st.session_state["turning_prediction_status"] = None
+            st.session_state["turning_prediction_result"] = None
 
         st.header("AI Predictor")
         predictor_index = st.selectbox(
@@ -998,14 +1222,59 @@ def main() -> None:
                     prediction_result = run_openai_predictor(predictor_index, latest_status)
                     st.session_state["prediction_status"] = {"status": "completed"}
                     st.session_state["prediction_result"] = prediction_result
+                    st.session_state["turning_prediction_status"] = None
+                    st.session_state["turning_prediction_result"] = None
                 except ValueError as exc:
                     st.session_state["prediction_status"] = {"status": "failed", "error_excerpt": str(exc)}
                     sidebar_predictor_warning = str(exc)
         if sidebar_predictor_warning:
             st.warning(sidebar_predictor_warning)
 
+        st.header("AI Turning Predictor")
+        turning_predictor_index = st.selectbox(
+            "Turning Predictor Index",
+            options=INDEX_OPTIONS,
+            format_func=lambda item: INDEX_LABELS[item],
+            index=INDEX_OPTIONS.index(DEFAULT_INDEX),
+            key="turning_predictor_index",
+        )
+        sidebar_turning_warning = None
+        if st.button("Run Turning AI Predictor", use_container_width=True):
+            latest_status = st.session_state.get("latest_status")
+            if not github_token_configured:
+                st.session_state["turning_prediction_status"] = {
+                    "status": "failed",
+                    "error_excerpt": "GITHUB_TOKEN is not configured. Add it to Streamlit secrets, the repo-root .env file, or environment variables.",
+                }
+                sidebar_turning_warning = st.session_state["turning_prediction_status"]["error_excerpt"]
+            elif not latest_status or latest_status.get("status") != "completed":
+                st.session_state["turning_prediction_status"] = {
+                    "status": "warning",
+                    "error_excerpt": "First refresh the data, then use AI Turning Predictor.",
+                }
+                sidebar_turning_warning = st.session_state["turning_prediction_status"]["error_excerpt"]
+            elif latest_status.get("params", {}).get("index") != turning_predictor_index:
+                st.session_state["turning_prediction_status"] = {
+                    "status": "warning",
+                    "error_excerpt": f"First refresh data for {INDEX_LABELS[turning_predictor_index]}, then use AI Turning Predictor.",
+                }
+                sidebar_turning_warning = st.session_state["turning_prediction_status"]["error_excerpt"]
+            else:
+                try:
+                    turning_prediction_result = run_ai_predictor(turning_predictor_index, latest_status, predictor_mode="turning")
+                    st.session_state["turning_prediction_status"] = {"status": "completed"}
+                    st.session_state["turning_prediction_result"] = turning_prediction_result
+                    st.session_state["prediction_status"] = None
+                    st.session_state["prediction_result"] = None
+                except ValueError as exc:
+                    st.session_state["turning_prediction_status"] = {"status": "failed", "error_excerpt": str(exc)}
+                    sidebar_turning_warning = str(exc)
+        if sidebar_turning_warning:
+            st.warning(sidebar_turning_warning)
+
     latest_status = st.session_state.get("latest_status")
     prediction_result = st.session_state.get("prediction_result")
+    turning_prediction_result = st.session_state.get("turning_prediction_result")
     if latest_status:
         if latest_status.get("status") == "failed":
             st.error("Trend refresh failed.")
@@ -1013,7 +1282,7 @@ def main() -> None:
                 st.caption(f"Failed step: `{latest_status['failed_step']}`")
             if latest_status.get("error_excerpt"):
                 st.code(latest_status["error_excerpt"])
-        elif not prediction_result:
+        elif not prediction_result and not turning_prediction_result:
             st.success("Latest trend data loaded.")
             render_results(latest_status)
     else:
@@ -1029,6 +1298,17 @@ def main() -> None:
             st.code(str(prediction_status["error_excerpt"]))
     elif prediction_result:
         render_prediction_results(prediction_result)
+
+    turning_prediction_status = st.session_state.get("turning_prediction_status")
+    if turning_prediction_status and turning_prediction_status.get("status") == "warning":
+        if not turning_prediction_result:
+            st.info("Use Refresh Data first, then run AI Turning Predictor for the same selected index.")
+    elif turning_prediction_status and turning_prediction_status.get("status") == "failed":
+        st.error("AI turning prediction failed.")
+        if turning_prediction_status.get("error_excerpt"):
+            st.code(str(turning_prediction_status["error_excerpt"]))
+    elif turning_prediction_result:
+        render_turning_prediction_results(turning_prediction_result)
 
 
 if __name__ == "__main__":
