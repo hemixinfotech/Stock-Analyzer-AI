@@ -20,7 +20,6 @@ except Exception:
 
 JOBS_DIR = REPO_ROOT / "jobs"
 LATEST_JOB_DIR = JOBS_DIR / "latest"
-PREDICTOR_CACHE_DIR = JOBS_DIR / "cache" / "predictors"
 INDEX_LABELS = {
     "nifty50": "Nifty 50",
     "nifty_midcap_100": "Nifty Midcap 100",
@@ -769,13 +768,36 @@ def build_predictor_cache_fingerprint(index_name: str, payload: dict, predictor_
     return hashlib.sha256(json.dumps(fingerprint_payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def get_predictor_cache_paths(index_name: str, predictor_mode: str, fingerprint: str) -> tuple[Path, Path]:
-    cache_key = hashlib.sha256(f"{sanitize_index_name(index_name)}|{predictor_mode}|{fingerprint}".encode("utf-8")).hexdigest()
-    PREDICTOR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    return (
-        PREDICTOR_CACHE_DIR / f"{cache_key}.json",
-        PREDICTOR_CACHE_DIR / f"{cache_key}.meta.json",
-    )
+@st.cache_data(show_spinner=False, ttl=900)
+def run_ai_predictor_cached(
+    index_name: str,
+    predictor_mode: str,
+    report_path_str: str,
+    report_hash: str,
+    predictor_fingerprint: str,
+    python_executable: str,
+) -> dict:
+    output_path = LATEST_JOB_DIR / f"prediction_{sanitize_index_name(index_name)}_{predictor_mode}.json"
+    predictor_stdout = LATEST_JOB_DIR / f"predictor_{predictor_mode}.stdout.log"
+    predictor_stderr = LATEST_JOB_DIR / f"predictor_{predictor_mode}.stderr.log"
+    predictor_cmd = [
+        python_executable,
+        str(REPO_ROOT / "scripts" / "github_stock_predictor.py"),
+        "--input",
+        report_path_str,
+        "--index",
+        index_name,
+        "--mode",
+        predictor_mode,
+        "--out",
+        str(output_path),
+    ]
+    predictor_result = run_command(predictor_cmd, predictor_stdout, predictor_stderr)
+    if predictor_result.returncode != 0:
+        raise ValueError((predictor_result.stderr or predictor_result.stdout or "OpenAI predictor failed.").strip())
+    if not output_path.exists():
+        raise ValueError("GitHub Models predictor did not create an output file.")
+    return load_json(output_path)
 
 
 def run_ai_predictor(index_name: str, status_payload: dict, predictor_mode: str = "all") -> dict:
@@ -789,45 +811,16 @@ def run_ai_predictor(index_name: str, status_payload: dict, predictor_mode: str 
 
     report_hash = compute_file_hash(report_path)
     predictor_fingerprint = build_predictor_cache_fingerprint(index_name, payload, predictor_mode)
+    prediction_payload = run_ai_predictor_cached(
+        index_name=index_name,
+        predictor_mode=predictor_mode,
+        report_path_str=str(report_path),
+        report_hash=report_hash,
+        predictor_fingerprint=predictor_fingerprint,
+        python_executable=get_project_python(),
+    )
     output_path = LATEST_JOB_DIR / f"prediction_{sanitize_index_name(index_name)}_{predictor_mode}.json"
-    predictor_stdout = LATEST_JOB_DIR / f"predictor_{predictor_mode}.stdout.log"
-    predictor_stderr = LATEST_JOB_DIR / f"predictor_{predictor_mode}.stderr.log"
-    cache_output_path, cache_meta_path = get_predictor_cache_paths(index_name, predictor_mode, predictor_fingerprint)
-    if cache_output_path.exists() and cache_meta_path.exists():
-        try:
-            cache_meta = load_json(cache_meta_path)
-            if cache_meta.get("predictor_fingerprint") == predictor_fingerprint:
-                cached_result = load_json(cache_output_path)
-                write_json(output_path, cached_result)
-                return cached_result
-        except Exception:
-            pass
-    predictor_cmd = [
-        get_project_python(),
-        str(REPO_ROOT / "scripts" / "github_stock_predictor.py"),
-        "--input",
-        str(report_path),
-        "--index",
-        index_name,
-        "--mode",
-        predictor_mode,
-        "--out",
-        str(output_path),
-    ]
-    predictor_result = run_command(predictor_cmd, predictor_stdout, predictor_stderr)
-    if predictor_result.returncode != 0:
-        raise ValueError((predictor_result.stderr or predictor_result.stdout or "OpenAI predictor failed.").strip())
-    if not output_path.exists():
-        raise ValueError("GitHub Models predictor did not create an output file.")
-    prediction_payload = load_json(output_path)
-    write_json(cache_output_path, prediction_payload)
-    write_json(cache_meta_path, {
-        "report_hash": report_hash,
-        "predictor_fingerprint": predictor_fingerprint,
-        "index_name": index_name,
-        "predictor_mode": predictor_mode,
-        "updated_at": utc_now(),
-    })
+    write_json(output_path, prediction_payload)
     return prediction_payload
 
 

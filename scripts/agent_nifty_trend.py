@@ -13,6 +13,7 @@ import hashlib
 import json
 import time
 import os
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -46,7 +47,7 @@ FYERS_ACCESS_TOKEN = os.getenv('FYERS_ACCESS_TOKEN', '')
 FYERS_BASE_URL = 'https://api.fyers.in/api/v3'
 FYERS_QUOTE_URL = 'https://api.fyers.in/api/v3/quotes'
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CACHE_DIR = REPO_ROOT / 'jobs' / 'cache'
+CACHE_DIR = Path(tempfile.gettempdir()) / 'stock-analyzer-ai-cache'
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -72,6 +73,30 @@ def build_cache_path(namespace, key, suffix):
     namespace_dir.mkdir(parents=True, exist_ok=True)
     hashed_key = hashlib.sha256(key.encode('utf-8')).hexdigest()
     return namespace_dir / f'{hashed_key}.{suffix}'
+
+
+def prune_cache_dir(namespace, max_age_seconds=24 * 60 * 60, max_files=200):
+    namespace_dir = CACHE_DIR / namespace
+    if not namespace_dir.exists():
+        return
+    now = time.time()
+    files = [path for path in namespace_dir.iterdir() if path.is_file()]
+    for path in files:
+        try:
+            if (now - path.stat().st_mtime) > max_age_seconds:
+                path.unlink()
+        except OSError:
+            pass
+    files = sorted(
+        [path for path in namespace_dir.iterdir() if path.is_file()],
+        key=lambda item: item.stat().st_mtime,
+        reverse=True,
+    )
+    for stale_path in files[max_files:]:
+        try:
+            stale_path.unlink()
+        except OSError:
+            pass
 
 
 def cache_is_fresh(path, ttl_seconds):
@@ -149,6 +174,7 @@ def get_constituents_from_wikipedia(index_name):
                 pass
 
     cache_path = build_cache_path('constituents', index_key, 'json')
+    prune_cache_dir('constituents', max_age_seconds=7 * 24 * 60 * 60, max_files=50)
     if cache_is_fresh(cache_path, 12 * 60 * 60):
         try:
             cached_symbols = read_json_cache(cache_path)
@@ -421,6 +447,7 @@ def fetch_history_fyers(symbol, period_days=120):
     # Use 'D' for daily candles
     cache_key = f'{symbol}|{period_days}'
     cache_path = build_cache_path('fyers_history', cache_key, 'pkl')
+    prune_cache_dir('fyers_history')
     ttl_seconds = history_cache_ttl_seconds()
     if cache_is_fresh(cache_path, ttl_seconds):
         try:
@@ -482,6 +509,7 @@ def fetch_quote_fyers(symbol):
     
     cache_key = symbol
     cache_path = build_cache_path('fyers_quote', cache_key, 'json')
+    prune_cache_dir('fyers_quote', max_age_seconds=6 * 60 * 60, max_files=200)
     ttl_seconds = quote_cache_ttl_seconds()
     if ttl_seconds > 0 and cache_is_fresh(cache_path, ttl_seconds):
         try:
@@ -532,6 +560,7 @@ def fetch_history_yf(ticker, period_days=120):
     """Fetch historical data. Priority: Fyers API -> yfinance"""
     cache_key = f'{ticker}|{period_days}'
     cache_path = build_cache_path('yf_history', cache_key, 'pkl')
+    prune_cache_dir('yf_history')
     ttl_seconds = history_cache_ttl_seconds()
      
     # Try Fyers first if credentials are available
@@ -576,6 +605,7 @@ def fetch_history_yf(ticker, period_days=120):
 def fetch_intraday_yf(ticker, interval):
     cache_key = f'{ticker}|{interval}'
     cache_path = build_cache_path('yf_intraday', cache_key, 'pkl')
+    prune_cache_dir('yf_intraday', max_age_seconds=6 * 60 * 60, max_files=300)
     ttl_seconds = intraday_cache_ttl_seconds()
     if cache_is_fresh(cache_path, ttl_seconds):
         try:
