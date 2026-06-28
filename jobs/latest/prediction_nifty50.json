@@ -40,7 +40,7 @@
       "volume_ratio": 1.6913868553886091
     }
   ],
-  "analysis": "Given the bullish market sentiment, the uptrend picks are chosen based on high RSI values above 67, strong signal strength of 8, and volume ratios above 1 indicating strong buying interest. ICICIBANK.NS and KOTAKBANK.NS stand out with the highest RSI and signal strength combined with above-average volume. For downtrend picks, despite the bullish market, stocks with very low RSI below 31 and very high volume ratios indicating strong selling pressure are selected. ONGC.NS and HINDALCO.NS have the lowest RSI and highest volume ratios among downtrend candidates, suggesting a strong probability of continuing downtrend.",
+  "analysis": "Given the bullish market sentiment, the uptrend picks are selected based on high RSI values above 67, strong signal strength of 8, and volume ratios above 1 indicating strong buying interest. ICICIBANK.NS and KOTAKBANK.NS stand out with the highest RSI and signal strength combined with volume ratios above 1. For downtrend picks, despite the bullish sentiment, stocks with very low RSI below 31 and very high volume ratios indicating strong selling pressure are chosen. ONGC.NS and HINDALCO.NS have the lowest RSI and highest volume ratios among downtrend candidates, suggesting a strong probability of continuing downtrend.",
   "provider": "GitHub Models (openai/gpt-4.1-mini)",
   "index": "nifty50",
   "input_market_sentiment": "Bullish"
