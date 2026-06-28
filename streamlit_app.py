@@ -34,9 +34,11 @@ def apply_page_style() -> None:
         <style>
         #MainMenu,
         footer,
+        [data-testid="stFooter"],
         [data-testid="stStatusWidget"],
         [data-testid="stDecoration"],
         [data-testid="stHeaderActionElements"],
+        [data-testid="stAppViewContainer__fork-button"],
         .stAppDeployButton,
         a[href*="streamlit.io"],
         a[href*="share.streamlit.io"],
