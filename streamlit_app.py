@@ -54,11 +54,6 @@ def apply_page_style() -> None:
             display: none !important;
             visibility: hidden !important;
         }
-        header[data-testid="stHeader"] button:not([aria-label*="sidebar"]):not([title*="sidebar"]),
-        header[data-testid="stHeader"] [role="button"]:not([aria-label*="sidebar"]):not([title*="sidebar"]) {
-            display: none !important;
-            visibility: hidden !important;
-        }
         @media (max-width: 768px) {
             .block-container {
                 padding-top: 1rem;
