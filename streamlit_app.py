@@ -311,8 +311,33 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def get_runtime_setting(name: str, default: str = "") -> str:
+    env_value = os.getenv(name, "").strip()
+    if env_value:
+        return env_value
+
+    try:
+        secret_value = st.secrets.get(name)
+    except Exception:
+        secret_value = None
+    if isinstance(secret_value, str) and secret_value.strip():
+        return secret_value.strip()
+
+    try:
+        github_section = st.secrets.get("github")
+    except Exception:
+        github_section = None
+    if hasattr(github_section, "get"):
+        for candidate_key in (name, name.lower(), name.removeprefix("GITHUB_").lower()):
+            candidate_value = github_section.get(candidate_key)
+            if isinstance(candidate_value, str) and candidate_value.strip():
+                return candidate_value.strip()
+
+    return default
+
+
 def get_project_python() -> str:
-    configured = os.getenv("PROJECT_PYTHON", "").strip()
+    configured = get_runtime_setting("PROJECT_PYTHON")
     if configured:
         candidate = Path(configured).expanduser()
         if candidate.exists():
@@ -417,8 +442,25 @@ def write_per_index_json_files(output_json: Path, out_dir: Path, indices: list[s
     return artifacts
 
 
-def run_command(command: list[str], stdout_path: Path, stderr_path: Path) -> subprocess.CompletedProcess:
-    result = subprocess.run(command, cwd=REPO_ROOT, capture_output=True, text=True)
+def build_subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    for name in ("PROJECT_PYTHON", "FYERS_API_KEY", "FYERS_ACCESS_TOKEN", "GITHUB_TOKEN", "GITHUB_MODEL"):
+        value = get_runtime_setting(name)
+        if value:
+            env[name] = value
+    return env
+
+
+def run_command(
+    command: list[str],
+    stdout_path: Path,
+    stderr_path: Path,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    command_env = build_subprocess_env()
+    if extra_env:
+        command_env.update(extra_env)
+    result = subprocess.run(command, cwd=REPO_ROOT, capture_output=True, text=True, env=command_env)
     stdout_path.write_text(result.stdout or "", encoding="utf-8")
     stderr_path.write_text(result.stderr or "", encoding="utf-8")
     return result
@@ -777,10 +819,19 @@ def main() -> None:
             index=INDEX_OPTIONS.index(DEFAULT_INDEX),
             key="predictor_index",
         )
+        github_token_configured = bool(get_runtime_setting("GITHUB_TOKEN"))
+        if not github_token_configured:
+            st.caption("Configure `GITHUB_TOKEN` in Streamlit secrets, the repo-root `.env`, or environment variables to enable predictions.")
         sidebar_predictor_warning = None
         if st.button("GitHub AI Stock Predict", use_container_width=True):
             latest_status = st.session_state.get("latest_status")
-            if not latest_status or latest_status.get("status") != "completed":
+            if not github_token_configured:
+                st.session_state["prediction_status"] = {
+                    "status": "failed",
+                    "error_excerpt": "GITHUB_TOKEN is not configured. Add it to Streamlit secrets, the repo-root .env file, or environment variables.",
+                }
+                sidebar_predictor_warning = st.session_state["prediction_status"]["error_excerpt"]
+            elif not latest_status or latest_status.get("status") != "completed":
                 st.session_state["prediction_status"] = {
                     "status": "warning",
                     "error_excerpt": "First refresh the data, then use GitHub AI Stock Predictor.",

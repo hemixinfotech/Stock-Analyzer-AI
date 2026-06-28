@@ -22,8 +22,11 @@ except Exception:
     pass
 
 
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
-GITHUB_MODEL = os.getenv("GITHUB_MODEL", "openai/gpt-4.1-mini").strip() or "openai/gpt-4.1-mini"
+def get_runtime_setting(name: str, default: str = "") -> str:
+    value = os.getenv(name, "").strip()
+    if value:
+        return value
+    return default
 
 
 def load_json(path: Path) -> dict:
@@ -103,7 +106,9 @@ def extract_message_content(message_content: object) -> str:
 
 
 def request_github_prediction(index_name: str, payload: dict) -> dict:
-    if not GITHUB_TOKEN:
+    github_token = get_runtime_setting("GITHUB_TOKEN")
+    github_model = get_runtime_setting("GITHUB_MODEL", "openai/gpt-4.1-mini") or "openai/gpt-4.1-mini"
+    if not github_token:
         raise RuntimeError("GITHUB_TOKEN is not configured. Add it to the repo-root .env file or environment variables.")
 
     summary = payload.get("summary", {})
@@ -132,12 +137,12 @@ def request_github_prediction(index_name: str, payload: dict) -> dict:
         "https://models.github.ai/inference/chat/completions",
         headers={
             "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {GITHUB_TOKEN}",
+            "Authorization": f"Bearer {github_token}",
             "Content-Type": "application/json",
             "X-GitHub-Api-Version": "2022-11-28",
         },
         json={
-            "model": GITHUB_MODEL,
+            "model": github_model,
             "messages": [
                 {
                     "role": "system",
@@ -180,7 +185,7 @@ def request_github_prediction(index_name: str, payload: dict) -> dict:
     if not isinstance(prediction, dict):
         raise RuntimeError("GitHub Models returned an invalid prediction payload.")
 
-    prediction["provider"] = f"GitHub Models ({GITHUB_MODEL})"
+    prediction["provider"] = f"GitHub Models ({github_model})"
     prediction["index"] = index_name
     prediction["input_market_sentiment"] = str(summary.get("market_trend", "neutral")).title()
     return prediction
