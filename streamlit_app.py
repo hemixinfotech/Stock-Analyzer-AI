@@ -773,7 +773,6 @@ def run_ai_predictor_cached(
     index_name: str,
     predictor_mode: str,
     report_path_str: str,
-    report_hash: str,
     predictor_fingerprint: str,
     python_executable: str,
 ) -> dict:
@@ -815,7 +814,6 @@ def run_ai_predictor(index_name: str, status_payload: dict, predictor_mode: str 
         index_name=index_name,
         predictor_mode=predictor_mode,
         report_path_str=str(report_path),
-        report_hash=report_hash,
         predictor_fingerprint=predictor_fingerprint,
         python_executable=get_project_python(),
     )
