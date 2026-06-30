@@ -49,6 +49,38 @@ FYERS_QUOTE_URL = 'https://api.fyers.in/api/v3/quotes'
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CACHE_DIR = Path(tempfile.gettempdir()) / 'stock-analyzer-ai-cache'
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
+TRADE_MODE_SETTINGS = {
+    'swing': {
+        'lookback': 20,
+        'intraday': False,
+        'probability_threshold': 60.0,
+        'probability_gap': 8.0,
+        'context_threshold': 0.25,
+        'horizon_label': '5-10 trading days',
+    },
+    'intraday': {
+        'lookback': 5,
+        'intraday': True,
+        'probability_threshold': 62.0,
+        'probability_gap': 8.0,
+        'context_threshold': 0.20,
+        'horizon_label': 'same day / next session',
+    },
+}
+SYMBOL_ALIASES = {
+    'ALKE': 'ALKEM',
+    'APLA': 'APLAPOLLO',
+    'ASTL': 'ASTRAL',
+    'AUFI': 'AUBANK',
+    'BANDHAN': 'BANDHANBNK',
+    'BHAX': 'BHARTIHEXA',
+    'BMBK': 'MAHABANK',
+    'BSEL': 'BSE',
+    'COCHIN': 'COCHINSHIP',
+    'COFO': 'COFORGE',
+    'FSNE': 'NYKAA',
+    'GMRINFRA': 'GMRAIRPORT',
+}
 
 
 def utc_now_iso() -> str:
@@ -140,6 +172,16 @@ def quote_cache_ttl_seconds():
     return 0 if is_market_hours() else 10 * 60
 
 
+def get_trade_mode_settings(trade_mode):
+    return TRADE_MODE_SETTINGS.get(trade_mode, TRADE_MODE_SETTINGS['swing'])
+
+
+def normalize_nse_symbol(symbol):
+    normalized = str(symbol).strip().upper().replace('.NS', '')
+    normalized = SYMBOL_ALIASES.get(normalized, normalized)
+    return normalized + '.NS' if normalized else ''
+
+
 def get_constituents_from_wikipedia(index_name):
     """Resolve constituents for an index.
 
@@ -166,8 +208,7 @@ def get_constituents_from_wikipedia(index_name):
                     else:
                         s = None
                     if s:
-                        s = s.strip().upper().replace('.NS', '')
-                        syms.append(s + '.NS')
+                        syms.append(normalize_nse_symbol(s))
                 return list(dict.fromkeys(syms))
             except Exception:
                 # if config file is malformed, continue to other methods
@@ -213,8 +254,7 @@ def get_constituents_from_wikipedia(index_name):
                 for c in t.columns:
                     if 'symbol' in str(c).lower() or 'ticker' in str(c).lower():
                         syms = t[c].astype(str).tolist()
-                        syms = [s.strip().upper().replace('.NS', '') for s in syms if s and s != '–']
-                        syms = [s + '.NS' for s in syms]
+                        syms = [normalize_nse_symbol(s) for s in syms if s and s != '–']
                         resolved = list(dict.fromkeys(syms))
                         write_json_cache(cache_path, resolved)
                         return resolved
@@ -241,16 +281,14 @@ def get_constituents_from_wikipedia(index_name):
             for col in df.columns:
                 if 'symbol' in col.lower() or 'code' in col.lower():
                     syms = df[col].astype(str).tolist()
-                    syms = [s.strip().upper().replace('.NS', '') for s in syms if s and s != '–']
-                    syms = [s + '.NS' for s in syms]
+                    syms = [normalize_nse_symbol(s) for s in syms if s and s != '–']
                     resolved = list(dict.fromkeys(syms))
                     write_json_cache(cache_path, resolved)
                     return resolved
             # if CSV has a 'Security Name' and 'ISIN' etc, attempt common column
             if 'SYMBOL' in (c.upper() for c in df.columns):
                 syms = df['SYMBOL'].astype(str).tolist()
-                syms = [s.strip().upper().replace('.NS', '') for s in syms if s and s != '–']
-                syms = [s + '.NS' for s in syms]
+                syms = [normalize_nse_symbol(s) for s in syms if s and s != '–']
                 resolved = list(dict.fromkeys(syms))
                 write_json_cache(cache_path, resolved)
                 return resolved
@@ -351,6 +389,28 @@ def compute_macd(series, fast=12, slow=26, signal=9):
     signal_line = macd_line.ewm(span=signal, adjust=False).mean()
     histogram = macd_line - signal_line
     return macd_line, signal_line, histogram
+
+
+def clamp(value, lower, upper):
+    return max(lower, min(upper, value))
+
+
+def normalize_signed(value, scale):
+    if value is None or scale in (None, 0):
+        return 0.0
+    return clamp(float(value) / float(scale), -1.0, 1.0)
+
+
+def weighted_boolean_score(components):
+    weighted_total = 0.0
+    weight_sum = 0.0
+    for _, is_active, weight in components:
+        weight_sum += weight
+        if is_active:
+            weighted_total += weight
+    if weight_sum <= 0:
+        return 0.0
+    return (weighted_total / weight_sum) * 100.0
 
 
 def detect_order_block_rejection(df, direction, lookback=20):
@@ -635,7 +695,9 @@ def fetch_intraday_yf(ticker, interval):
     return df
 
 
-def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='5m', vote_mode='majority', supertrend_period=10, supertrend_multiplier=3.0, price_action_lookback=3):
+def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='5m', vote_mode='majority', supertrend_period=10, supertrend_multiplier=3.0, price_action_lookback=3, trade_mode='swing'):
+    mode_settings = get_trade_mode_settings(trade_mode)
+    effective_intraday = bool(intraday or mode_settings['intraday'])
     # fetch daily history
     history_days = max(int(lookback_days) + 10, 60)
     hist = fetch_history_yf(ticker, period_days=history_days)
@@ -681,6 +743,8 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
     latest_volume = float(volume.iloc[-1]) if not volume.empty else None
     avg_volume_20 = float(volume.tail(20).mean()) if not volume.empty else None
     volume_ratio = (latest_volume / avg_volume_20) if latest_volume is not None and avg_volume_20 not in (None, 0) else None
+    atr_series = atr(hist.tail(max(30, lookback_days)))
+    atr14 = float(atr_series.iloc[-1]) if not atr_series.dropna().empty else None
 
     macd_line, macd_signal_line, macd_histogram = compute_macd(close)
     macd_value = float(macd_line.iloc[-1]) if not macd_line.dropna().empty else None
@@ -707,7 +771,7 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
 
     # VWAP (intraday)
     vwap_latest = None
-    if intraday:
+    if effective_intraday:
         if yf is not None:
             try:
                 intr = fetch_intraday_yf(ticker, vwap_resolution)
@@ -758,7 +822,7 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
     kalman_signal = (kalman_level is not None) and (latest_close > kalman_level)
     rsi_signal = None if rsi_value is None else rsi_value >= 50.0
     vwap_signal = None
-    if intraday:
+    if effective_intraday:
         if vwap_latest is None:
             vwap_signal = None
         else:
@@ -804,6 +868,28 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
         prev_close >= prev_kalman_level
     )
 
+    price_vs_sma20 = normalize_signed((latest_close - sma20), atr14 or latest_close * 0.02 if latest_close else 1.0)
+    price_vs_sma50 = normalize_signed((latest_close - sma50), atr14 or latest_close * 0.02 if latest_close else 1.0)
+    ema_slope_strength = normalize_signed(ema20_slope, atr14 or latest_close * 0.01 if latest_close else 1.0)
+    macd_hist_strength = normalize_signed(macd_hist_value, atr14 or latest_close * 0.01 if latest_close else 1.0)
+    bullish_context_score = clamp(
+        (
+            (0.55 if prev_rsi is not None and prev_rsi <= 45.0 else 0.0) +
+            (0.25 if prev_close <= float(ema20_series.iloc[-2]) else 0.0) +
+            (0.20 if prev_macd_value is not None and prev_macd_signal_value is not None and prev_macd_value <= prev_macd_signal_value else 0.0)
+        ),
+        0.0,
+        1.0,
+    )
+    bearish_context_score = clamp(
+        (
+            (0.55 if prev_rsi is not None and prev_rsi >= 55.0 else 0.0) +
+            (0.25 if prev_close >= float(ema20_series.iloc[-2]) else 0.0) +
+            (0.20 if prev_macd_value is not None and prev_macd_signal_value is not None and prev_macd_value >= prev_macd_signal_value else 0.0)
+        ),
+        0.0,
+        1.0,
+    )
     turning_bullish_conditions = {
         'order_block_rejection': bullish_ob_rejection,
         'close_holds_above_kalman': kalman_turning_bullish,
@@ -811,6 +897,9 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
         'macd_bullish': macd_bullish,
         'rsi_recovering': rsi_turning_bullish,
         'volume_confirming': volume_bullish,
+        'price_reclaims_sma20': price_vs_sma20 > 0,
+        'ema20_slope_improving': ema_slope_strength > 0,
+        'price_action_bullish': bool(pa_bull) if pa_bull is not None else False,
     }
     turning_bearish_conditions = {
         'order_block_rejection': bearish_ob_rejection,
@@ -819,28 +908,52 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
         'macd_bearish': macd_bearish,
         'rsi_fading': rsi_turning_bearish,
         'volume_confirming': volume_bearish,
+        'price_loses_sma20': price_vs_sma20 < 0,
+        'ema20_slope_weakening': ema_slope_strength < 0,
+        'price_action_bearish': bool(pa_bear) if pa_bear is not None else False,
     }
-    turning_bullish_available = {key: value for key, value in turning_bullish_conditions.items() if key != 'close_recovers_above_vwap' or intraday}
-    turning_bearish_available = {key: value for key, value in turning_bearish_conditions.items() if key != 'close_capped_below_vwap' or intraday}
+    turning_bullish_available = {key: value for key, value in turning_bullish_conditions.items() if key != 'close_recovers_above_vwap' or effective_intraday}
+    turning_bearish_available = {key: value for key, value in turning_bearish_conditions.items() if key != 'close_capped_below_vwap' or effective_intraday}
     turning_bullish_count = sum(1 for value in turning_bullish_available.values() if value)
     turning_bearish_count = sum(1 for value in turning_bearish_available.values() if value)
-    turning_bullish_threshold = 4 if len(turning_bullish_available) >= 5 else max(3, len(turning_bullish_available))
-    turning_bearish_threshold = 4 if len(turning_bearish_available) >= 5 else max(3, len(turning_bearish_available))
-    turning_bullish = turning_bullish_count >= turning_bullish_threshold
-    turning_bearish = turning_bearish_count >= turning_bearish_threshold
-
-    bearish_context = (
-        (prev_rsi is not None and prev_rsi < 50.0) or
-        (prev_close <= float(ema20_series.iloc[-2]) if len(ema20_series) > 1 else False) or
-        (prev_macd_value is not None and prev_macd_signal_value is not None and prev_macd_value <= prev_macd_signal_value)
+    turning_bullish_components = [
+        ('context_from_prior_weakness', bullish_context_score >= 0.55, 0.18),
+        ('macd_reversal', macd_bullish, 0.18),
+        ('kalman_reclaim', kalman_turning_bullish, 0.14),
+        ('rsi_recovery', rsi_turning_bullish, 0.12),
+        ('price_reclaims_sma20', price_vs_sma20 > 0, 0.10),
+        ('ema20_slope_improving', ema_slope_strength > 0, 0.08),
+        ('price_vs_sma50_support', price_vs_sma50 > -0.35, 0.07),
+        ('order_block_rejection', bullish_ob_rejection, 0.08),
+        ('price_action_bullish', pa_bull is True, 0.05),
+        ('volume_confirmation', volume_bullish, 0.05),
+        ('intraday_vwap_reclaim', bool(vwap_signal) if effective_intraday and vwap_signal is not None else False, 0.05),
+    ]
+    turning_bearish_components = [
+        ('context_from_prior_strength', bearish_context_score >= 0.55, 0.18),
+        ('macd_reversal', macd_bearish, 0.18),
+        ('kalman_breakdown', kalman_turning_bearish, 0.14),
+        ('rsi_fade', rsi_turning_bearish, 0.12),
+        ('price_loses_sma20', price_vs_sma20 < 0, 0.10),
+        ('ema20_slope_weakening', ema_slope_strength < 0, 0.08),
+        ('price_vs_sma50_resistance', price_vs_sma50 < 0.35, 0.07),
+        ('order_block_rejection', bearish_ob_rejection, 0.08),
+        ('price_action_bearish', pa_bear is True, 0.05),
+        ('volume_confirmation', volume_bearish, 0.05),
+        ('intraday_vwap_failure', bool(bearish_vwap_signal) if effective_intraday and bearish_vwap_signal is not None else False, 0.05),
+    ]
+    turning_bullish_probability = round(weighted_boolean_score(turning_bullish_components), 2)
+    turning_bearish_probability = round(weighted_boolean_score(turning_bearish_components), 2)
+    turning_bullish = (
+        bullish_context_score >= mode_settings['context_threshold'] and
+        turning_bullish_probability >= mode_settings['probability_threshold'] and
+        turning_bullish_probability >= turning_bearish_probability + mode_settings['probability_gap']
     )
-    bullish_context = (
-        (prev_rsi is not None and prev_rsi > 50.0) or
-        (prev_close >= float(ema20_series.iloc[-2]) if len(ema20_series) > 1 else False) or
-        (prev_macd_value is not None and prev_macd_signal_value is not None and prev_macd_value >= prev_macd_signal_value)
+    turning_bearish = (
+        bearish_context_score >= mode_settings['context_threshold'] and
+        turning_bearish_probability >= mode_settings['probability_threshold'] and
+        turning_bearish_probability >= turning_bullish_probability + mode_settings['probability_gap']
     )
-    turning_bullish = turning_bullish and bearish_context
-    turning_bearish = turning_bearish and bullish_context
 
     # Strong trend detection using prioritized rules
     strong_up = False
@@ -880,7 +993,7 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
         signals.append(bool(rsi_signal))
     if kalman_level is not None:
         signals.append(bool(kalman_signal))
-    if intraday and vwap_signal is not None:
+    if effective_intraday and vwap_signal is not None:
         signals.append(bool(vwap_signal))
 
     uptrend = False
@@ -919,6 +1032,8 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
         'ticker': ticker,
         'close': latest_close,
         'lookback_close': lookback_close,
+        'trade_mode': trade_mode,
+        'trade_horizon': mode_settings['horizon_label'],
         'percent_change': percent_change,
         'ema20': float(ema20),
         'ema50': float(ema50),
@@ -929,6 +1044,7 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
         'volume': latest_volume,
         'avg_volume_20': avg_volume_20,
         'volume_ratio': volume_ratio,
+        'atr14': atr14,
         'ema20_slope': float(ema20_slope),
         'ma_crossover': bool(ma_crossover),
         'kalman_level': float(kalman_level) if kalman_level is not None else None,
@@ -944,6 +1060,10 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
         'bearish_order_block': bearish_order_block,
         'turning_bullish_score': turning_bullish_count,
         'turning_bearish_score': turning_bearish_count,
+        'turning_bullish_probability': turning_bullish_probability,
+        'turning_bearish_probability': turning_bearish_probability,
+        'turning_context_bullish': round(bullish_context_score * 100.0, 2),
+        'turning_context_bearish': round(bearish_context_score * 100.0, 2),
         'signals': {
             'ma_crossover_sma20_gt_sma50': bool(ma_crossover),
             'price_above_sma20': bool(price_above_sma20),
@@ -952,11 +1072,13 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
             'rsi_gte_50': bool(rsi_signal) if rsi_signal is not None else None,
             'ema20_slope_pos': ema20_slope > 0,
             'close_gt_kalman': bool(kalman_signal) if kalman_level is not None else None,
-            'close_gt_vwap': bool(vwap_signal) if intraday else None,
+            'close_gt_vwap': bool(vwap_signal) if effective_intraday else None,
             'supertrend_up': bool(st_trend) if st_trend is not None else None,
             'price_action_bullish': bool(pa_bull) if pa_bull is not None else None,
             'turning_bullish': turning_bullish,
             'turning_bearish': turning_bearish,
+            'turning_bullish_probability': turning_bullish_probability,
+            'turning_bearish_probability': turning_bearish_probability,
             'turning_bullish_conditions': turning_bullish_conditions,
             'turning_bearish_conditions': turning_bearish_conditions,
         },
@@ -967,8 +1089,9 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Agentic NIFTY Trend Skill with Fyers Real-time Data')
     parser.add_argument('--indices', type=str, default='nifty50,nifty100,nifty500', help='Comma separated indices')
-    parser.add_argument('--lookback', type=int, default=100, help='Lookback days for EMA/Kalman')
+    parser.add_argument('--lookback', type=int, default=None, help='Override lookback days for EMA/Kalman and turning-trend detection')
     parser.add_argument('--intraday', action='store_true', help='Enable intraday VWAP computation')
+    parser.add_argument('--trade-mode', choices=['swing', 'intraday'], default='swing', help='Trading horizon mode')
     parser.add_argument('--vwap-resolution', type=str, default='5m', help='VWAP resolution for intraday (1m,5m,15m)')
     parser.add_argument('--vote-mode', choices=['strict','majority','any'], default='majority', help='Voting mode for combining signals')
     parser.add_argument('--supertrend-period', type=int, default=10, help='ATR period for SuperTrend')
@@ -987,6 +1110,9 @@ def main(argv=None):
         FYERS_ACCESS_TOKEN = args.fyers_access_token
 
     indices = [i.strip() for i in args.indices.split(',') if i.strip()]
+    mode_settings = get_trade_mode_settings(args.trade_mode)
+    effective_lookback = int(args.lookback) if args.lookback is not None else int(mode_settings['lookback'])
+    effective_intraday = bool(args.intraday or mode_settings['intraday'])
 
     records = []
     for idx in indices:
@@ -1004,13 +1130,14 @@ def main(argv=None):
             try:
                 item = evaluate_ticker(
                     s,
-                    lookback_days=args.lookback,
-                    intraday=args.intraday,
+                    lookback_days=effective_lookback,
+                    intraday=effective_intraday,
                     vwap_resolution=args.vwap_resolution,
                     vote_mode=args.vote_mode,
                     supertrend_period=args.supertrend_period,
                     supertrend_multiplier=args.supertrend_multiplier,
                     price_action_lookback=args.price_action_lookback,
+                    trade_mode=args.trade_mode,
                 )
                 if item:
                     item.update({'index': idx, 'timestamp': utc_now_iso()})
@@ -1038,7 +1165,11 @@ def main(argv=None):
         'total_tickers': total,
         'percent_up': percent_up,
         'percent_down': percent_down,
-        'market_trend': market_trend
+        'market_trend': market_trend,
+        'trade_mode': args.trade_mode,
+        'trade_horizon': mode_settings['horizon_label'],
+        'lookback_days': effective_lookback,
+        'intraday_vwap': effective_intraday,
     }
 
     output = {'summary': summary, 'records': records}

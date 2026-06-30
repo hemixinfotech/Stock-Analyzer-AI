@@ -18,6 +18,7 @@ import requests
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BULLISH_TRENDS = {"up", "turning_bullish"}
 BEARISH_TRENDS = {"down", "turning_bearish"}
+ALL_INDICES = "all_indices"
 
 try:
     from dotenv import load_dotenv
@@ -57,6 +58,10 @@ def normalize_numeric(value: object, default: float | None) -> float | None:
     return default
 
 
+def clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(upper, value))
+
+
 def rank_prediction_candidates(records: list[dict], trend: str) -> list[dict]:
     if trend == "up":
         trend_records = [record for record in records if record.get("trend") in BULLISH_TRENDS]
@@ -90,6 +95,7 @@ def rank_turning_candidates(records: list[dict], trend: str) -> list[dict]:
         return sorted(
             trend_records,
             key=lambda record: (
+                normalize_numeric(record.get("turning_bullish_probability"), -1.0),
                 normalize_numeric(record.get("turning_bullish_score"), -1.0),
                 normalize_numeric(record.get("volume_ratio"), -1.0),
                 normalize_numeric(record.get("rsi"), -1.0),
@@ -101,6 +107,7 @@ def rank_turning_candidates(records: list[dict], trend: str) -> list[dict]:
     return sorted(
         trend_records,
         key=lambda record: (
+            normalize_numeric(record.get("turning_bearish_probability"), -1.0),
             normalize_numeric(record.get("turning_bearish_score"), -1.0),
             normalize_numeric(record.get("volume_ratio"), -1.0),
             -normalize_numeric(record.get("rsi"), 101.0),
@@ -128,24 +135,97 @@ def build_prediction_candidates(records: list[dict], trend: str, limit: int = 8)
     ]
 
 
-def build_turning_candidates(records: list[dict], trend: str, limit: int = 8) -> list[dict]:
+def build_turning_trade_levels(record: dict, trend: str) -> tuple[float | None, float | None, float | None]:
+    close = normalize_numeric(record.get("close"), None)
+    atr14 = normalize_numeric(record.get("atr14"), None)
+    probability_key = "turning_bullish_probability" if trend == "turning_bullish" else "turning_bearish_probability"
+    probability = normalize_numeric(record.get(probability_key), 65.0) or 65.0
+    if close is None:
+        return None, None, None
+
+    fallback_risk = close * 0.0125
+    risk_unit = atr14 * 0.9 if atr14 is not None and atr14 > 0 else fallback_risk
+    risk_unit = max(risk_unit, close * 0.006)
+    reward_multiple = clamp(1.6 + ((probability - 65.0) / 35.0), 1.5, 2.6)
+
+    if trend == "turning_bullish":
+        stop_loss = close - risk_unit
+        target_price = close + (risk_unit * reward_multiple)
+    else:
+        stop_loss = close + risk_unit
+        target_price = close - (risk_unit * reward_multiple)
+    return close, round(target_price, 2), round(stop_loss, 2)
+
+
+def build_turning_candidates(records: list[dict], trend: str, limit: int | None = None) -> list[dict]:
     ranked_records = rank_turning_candidates(records, trend)
     score_key = "turning_bullish_score" if trend == "turning_bullish" else "turning_bearish_score"
-    return [
-        {
-            "ticker": str(record.get("ticker", "")),
-            "trend": str(record.get("trend", "")),
-            "rsi": normalize_numeric(record.get("rsi"), None),
-            "close": normalize_numeric(record.get("close"), None),
-            "percent_change": normalize_numeric(record.get("percent_change"), None),
-            "turning_score": normalize_numeric(record.get(score_key), None),
-            "signal_strength": signal_strength(record),
-            "volume": normalize_numeric(record.get("volume"), None),
-            "avg_volume_20": normalize_numeric(record.get("avg_volume_20"), None),
-            "volume_ratio": normalize_numeric(record.get("volume_ratio"), None),
+    probability_key = "turning_bullish_probability" if trend == "turning_bullish" else "turning_bearish_probability"
+    candidates = []
+    for record in ranked_records[:limit]:
+        buy_price, target_price, stop_loss = build_turning_trade_levels(record, trend)
+        candidates.append(
+            {
+                "ticker": str(record.get("ticker", "")),
+                "index": str(record.get("index", "")),
+                "trend": str(record.get("trend", "")),
+                "rsi": normalize_numeric(record.get("rsi"), None),
+                "close": normalize_numeric(record.get("close"), None),
+                "percent_change": normalize_numeric(record.get("percent_change"), None),
+                "turning_score": normalize_numeric(record.get(score_key), None),
+                "turning_probability": normalize_numeric(record.get(probability_key), None),
+                "signal_strength": signal_strength(record),
+                "volume": normalize_numeric(record.get("volume"), None),
+                "avg_volume_20": normalize_numeric(record.get("avg_volume_20"), None),
+                "volume_ratio": normalize_numeric(record.get("volume_ratio"), None),
+                "atr14": normalize_numeric(record.get("atr14"), None),
+                "buy_price": buy_price,
+                "target_price": target_price,
+                "stop_loss": stop_loss,
+            }
+        )
+    return candidates
+
+
+def build_turning_prediction(index_name: str, payload: dict) -> dict:
+    summary = payload.get("summary", {})
+    records = payload.get("records", [])
+    bullish_candidates = build_turning_candidates(records, "turning_bullish")
+    bearish_candidates = build_turning_candidates(records, "turning_bearish")
+    if not bullish_candidates and not bearish_candidates:
+        raise RuntimeError("No standardized turning bullish or turning bearish candidates are available in the refreshed data.")
+    return {
+        "index": index_name,
+        "market_sentiment": summary.get("market_trend", "neutral"),
+        "turning_bullish_picks": bullish_candidates,
+        "turning_bearish_picks": bearish_candidates,
+        "analysis": (
+            "Deterministic turning-trend ranking based on weighted reversal probability, prior-trend context, "
+            "momentum shift, price reclaim/breakdown, and volume confirmation."
+        ),
+        "provider": "Deterministic Turning Probability Model",
+        "input_market_sentiment": str(summary.get("market_trend", "neutral")).title(),
+    }
+
+
+def split_payload_by_index(payload: dict) -> dict[str, dict]:
+    records = payload.get("records", [])
+    grouped_records: dict[str, list[dict]] = {}
+    for record in records:
+        index_name = str(record.get("index", "")).strip()
+        if not index_name:
+            continue
+        grouped_records.setdefault(index_name, []).append(record)
+    grouped_payloads = {}
+    for index_name, index_records in grouped_records.items():
+        grouped_payloads[index_name] = {
+            "summary": {
+                **payload.get("summary", {}),
+                "total_tickers": len([record for record in index_records if record.get("trend")]),
+            },
+            "records": index_records,
         }
-        for record in ranked_records[:limit]
-    ]
+    return grouped_payloads
 
 
 def extract_message_content(message_content: object) -> str:
@@ -204,6 +284,21 @@ def post_github_models_request(github_token: str, github_model: str, prompt: str
 
 
 def request_github_prediction(index_name: str, payload: dict, mode: str = "all") -> dict:
+    if mode == "turning":
+        if index_name == ALL_INDICES:
+            per_index_predictions = []
+            for child_index, child_payload in split_payload_by_index(payload).items():
+                per_index_predictions.append(build_turning_prediction(child_index, child_payload))
+            if not per_index_predictions:
+                raise RuntimeError("No index records are available for turning prediction.")
+            return {
+                "index": index_name,
+                "provider": "Deterministic Turning Probability Model",
+                "analysis": "Standardized turning bullish and turning bearish lists grouped by index.",
+                "indices": per_index_predictions,
+            }
+        return build_turning_prediction(index_name, payload)
+
     github_token = get_runtime_setting("GITHUB_TOKEN")
     github_model = get_runtime_setting("GITHUB_MODEL", "openai/gpt-4.1-mini") or "openai/gpt-4.1-mini"
     if not github_token:
@@ -215,43 +310,25 @@ def request_github_prediction(index_name: str, payload: dict, mode: str = "all")
         "index": index_name,
         "market_sentiment": summary.get("market_trend", "neutral"),
     }
-    if mode == "turning":
-        candidate_payload["turning_bullish_candidates"] = build_turning_candidates(records, "turning_bullish")
-        candidate_payload["turning_bearish_candidates"] = build_turning_candidates(records, "turning_bearish")
-        required_keys = ("turning_bullish_candidates", "turning_bearish_candidates")
-    else:
-        candidate_payload["uptrend_candidates"] = build_prediction_candidates(records, "up")
-        candidate_payload["downtrend_candidates"] = build_prediction_candidates(records, "down")
-        required_keys = ("uptrend_candidates", "downtrend_candidates")
+    candidate_payload["uptrend_candidates"] = build_prediction_candidates(records, "up")
+    candidate_payload["downtrend_candidates"] = build_prediction_candidates(records, "down")
+    required_keys = ("uptrend_candidates", "downtrend_candidates")
 
     if not any(candidate_payload[key] for key in required_keys):
         raise RuntimeError("No trend candidates are available in the refreshed data.")
 
-    if mode == "turning":
-        prompt = (
-            "You are analyzing refreshed Indian stock index trend data for one trading-day setup.\n"
-            "Choose the top 2 turning bullish stocks and the top 2 turning bearish stocks as reversal setups.\n"
-            "Use only the given candidates. Respect the overall market sentiment when choosing the picks.\n"
-            "Return strict JSON only with keys: market_sentiment, turning_bullish_picks, turning_bearish_picks, analysis.\n"
-            "Each pick object must contain ticker, trend, rsi, close, turning_score, signal_strength, volume, avg_volume_20, volume_ratio, buy_price, target_price, stop_loss.\n"
-            "Set buy_price near the current close, target_price above buy_price for turning bullish setups and below buy_price for turning bearish setups, "
-            "and stop_loss on the opposite side with realistic one-day risk-reward logic.\n"
-            "Use volume_ratio together with RSI, percent_change, turning score, and reversal context to judge probability.\n\n"
-            f"Candidate data:\n{json.dumps(candidate_payload, indent=2)}"
-        )
-    else:
-        prompt = (
-            "You are analyzing refreshed Indian stock index trend data for one trading-day setup.\n"
-            "From the candidate lists, choose the top 2 stocks with the highest probability of continuing uptrend "
-            "and the top 2 stocks with the highest probability of continuing downtrend for the selected day range.\n"
-            "Use only the given candidates. Respect the overall market sentiment when choosing the picks.\n"
-            "Return strict JSON only with keys: market_sentiment, uptrend_picks, downtrend_picks, analysis.\n"
-            "Each pick object must contain ticker, trend, rsi, close, signal_strength, volume, avg_volume_20, volume_ratio, buy_price, target_price, stop_loss.\n"
-            "Set buy_price near the current close, target_price above buy_price for bullish setups and below buy_price for bearish setups, "
-            "and stop_loss on the opposite side with realistic one-day risk-reward logic.\n"
-            "Use volume_ratio together with RSI, percent_change, and signal strength to judge continuation probability.\n\n"
-            f"Candidate data:\n{json.dumps(candidate_payload, indent=2)}"
-        )
+    prompt = (
+        "You are analyzing refreshed Indian stock index trend data for one trading-day setup.\n"
+        "From the candidate lists, choose the top 2 stocks with the highest probability of continuing uptrend "
+        "and the top 2 stocks with the highest probability of continuing downtrend for the selected day range.\n"
+        "Use only the given candidates. Respect the overall market sentiment when choosing the picks.\n"
+        "Return strict JSON only with keys: market_sentiment, uptrend_picks, downtrend_picks, analysis.\n"
+        "Each pick object must contain ticker, trend, rsi, close, signal_strength, volume, avg_volume_20, volume_ratio, buy_price, target_price, stop_loss.\n"
+        "Set buy_price near the current close, target_price above buy_price for bullish setups and below buy_price for bearish setups, "
+        "and stop_loss on the opposite side with realistic one-day risk-reward logic.\n"
+        "Use volume_ratio together with RSI, percent_change, and signal strength to judge continuation probability.\n\n"
+        f"Candidate data:\n{json.dumps(candidate_payload, indent=2)}"
+    )
     response = post_github_models_request(github_token, github_model, prompt)
     try:
         response.raise_for_status()
@@ -302,7 +379,7 @@ def request_github_prediction(index_name: str, payload: dict, mode: str = "all")
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description="Predict top 2 uptrend and downtrend stocks using GitHub Models")
     parser.add_argument("--input", required=True, help="Input refreshed per-index JSON file")
-    parser.add_argument("--index", required=True, help="Index name")
+    parser.add_argument("--index", required=True, help="Index name or all_indices")
     parser.add_argument("--out", required=True, help="Output JSON file")
     parser.add_argument("--mode", choices=["all", "turning"], default="all", help="Prediction mode")
     args = parser.parse_args(argv)

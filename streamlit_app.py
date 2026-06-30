@@ -4,11 +4,19 @@ import shutil
 import subprocess
 import sys
 import hashlib
+import html
+from xml.etree import ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pandas as pd
+import requests
 import streamlit as st
+
+try:
+    import yfinance as yf
+except Exception:
+    yf = None
 
 REPO_ROOT = Path(__file__).resolve().parent
 
@@ -21,12 +29,44 @@ except Exception:
 JOBS_DIR = REPO_ROOT / "jobs"
 LATEST_JOB_DIR = JOBS_DIR / "latest"
 INDEX_LABELS = {
+    "all_indices": "All Supported Indices",
     "nifty50": "Nifty 50",
     "nifty_midcap_100": "Nifty Midcap 100",
     "nifty_smallcap_100": "Nifty Smallcap 100",
 }
 INDEX_OPTIONS = list(INDEX_LABELS.keys())
 DEFAULT_INDEX = "nifty50"
+TRADE_MODE_OPTIONS = ("swing", "intraday")
+TRADE_MODE_LABELS = {
+    "swing": "Swing (5-10 Days)",
+    "intraday": "Intraday",
+}
+TRADE_MODE_SETTINGS = {
+    "swing": {
+        "lookback_days": 20,
+        "intraday": False,
+        "horizon": "5-10 trading days",
+        "caption": "Reversal setups meant for short swing trades over the next few sessions.",
+    },
+    "intraday": {
+        "lookback_days": 5,
+        "intraday": True,
+        "horizon": "same day / next session",
+        "caption": "Faster reversal setups for market-hours decisions with intraday VWAP confirmation.",
+    },
+}
+GLOBAL_CUE_SYMBOLS = [
+    ("S&P 500", "^GSPC", "risk"),
+    ("Nasdaq", "^IXIC", "risk"),
+    ("Dow Jones", "^DJI", "risk"),
+    ("Nikkei 225", "^N225", "risk"),
+    ("Hang Seng", "^HSI", "risk"),
+    ("Crude Oil", "CL=F", "commodity"),
+    ("Gold", "GC=F", "defensive"),
+    ("India VIX", "^INDIAVIX", "volatility"),
+]
+NEWS_POSITIVE_KEYWORDS = {"beat", "wins", "growth", "surge", "approval", "order", "profit", "upgrade", "bullish", "rally", "strong"}
+NEWS_NEGATIVE_KEYWORDS = {"fall", "drops", "downgrade", "loss", "probe", "weak", "bearish", "cuts", "decline", "miss", "slump"}
 BULLISH_TRENDS = {"up", "turning_bullish"}
 BEARISH_TRENDS = {"down", "turning_bearish"}
 TREND_PRIORITY = {
@@ -35,6 +75,180 @@ TREND_PRIORITY = {
     "Turning Bearish": 0,
     "Down": 1,
 }
+
+
+def expand_index_selection(index_name: str) -> list[str]:
+    if index_name == "all_indices":
+        return [item for item in INDEX_OPTIONS if item != "all_indices"]
+    return [index_name]
+
+
+def get_trade_mode_settings(trade_mode: str) -> dict:
+    return TRADE_MODE_SETTINGS.get(trade_mode, TRADE_MODE_SETTINGS["swing"])
+
+
+def status_covers_index(status_payload: dict, index_name: str) -> bool:
+    selected_indices = status_payload.get("params", {}).get("indices") or expand_index_selection(
+        status_payload.get("params", {}).get("index", DEFAULT_INDEX)
+    )
+    if index_name == "all_indices":
+        return set(expand_index_selection(index_name)).issubset(set(selected_indices))
+    return index_name in selected_indices
+
+
+def clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(upper, value))
+
+
+def normalize_numeric(value: object, default: float | None = None) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    return default
+
+
+def build_turning_trade_levels(record: dict) -> dict[str, float | None]:
+    trend = str(record.get("trend", ""))
+    close = normalize_numeric(record.get("close"))
+    atr14 = normalize_numeric(record.get("atr14"))
+    mode_settings = get_trade_mode_settings(str(record.get("trade_mode", "swing")))
+    if close is None or trend not in {"turning_bullish", "turning_bearish"}:
+        return {"buy_price": None, "target_price": None, "stop_loss": None}
+
+    probability_key = "turning_bullish_probability" if trend == "turning_bullish" else "turning_bearish_probability"
+    probability = normalize_numeric(record.get(probability_key), 65.0) or 65.0
+    fallback_risk = close * (0.006 if mode_settings["intraday"] else 0.0125)
+    risk_unit = atr14 * 0.9 if atr14 is not None and atr14 > 0 else fallback_risk
+    risk_unit = max(risk_unit, close * (0.004 if mode_settings["intraday"] else 0.006))
+    reward_multiple = clamp(1.3 + ((probability - 65.0) / 40.0), 1.2, 2.0) if mode_settings["intraday"] else clamp(1.6 + ((probability - 65.0) / 35.0), 1.5, 2.6)
+
+    if trend == "turning_bullish":
+        target_price = close + (risk_unit * reward_multiple)
+        stop_loss = close - risk_unit
+    else:
+        target_price = close - (risk_unit * reward_multiple)
+        stop_loss = close + risk_unit
+
+    return {
+        "buy_price": round(close, 2),
+        "target_price": round(target_price, 2),
+        "stop_loss": round(stop_loss, 2),
+    }
+def classify_headline_signal(headline: str) -> str:
+    text = headline.lower()
+    positive_hits = sum(1 for keyword in NEWS_POSITIVE_KEYWORDS if keyword in text)
+    negative_hits = sum(1 for keyword in NEWS_NEGATIVE_KEYWORDS if keyword in text)
+    if positive_hits > negative_hits:
+        return "Bullish"
+    if negative_hits > positive_hits:
+        return "Bearish"
+    return "Neutral"
+
+
+def extract_close_series(history: pd.DataFrame) -> pd.Series:
+    if history is None or history.empty:
+        return pd.Series(dtype=float)
+    if isinstance(history.columns, pd.MultiIndex):
+        close_columns = [column for column in history.columns if column[0] == "Close"]
+        if close_columns:
+            return history[close_columns[0]].dropna()
+        return pd.Series(dtype=float)
+    if "Close" not in history.columns:
+        return pd.Series(dtype=float)
+    return history["Close"].dropna()
+
+
+@st.cache_data(show_spinner=False, ttl=900)
+def fetch_stock_news_rows(stocks: tuple[str, ...]) -> list[dict]:
+    rows = []
+    for stock_name in stocks[:8]:
+        query = f'"{stock_name}" NSE stock results OR order OR guidance OR upgrade OR downgrade'
+        url = f"https://news.google.com/rss/search?q={requests.utils.quote(query)}&hl=en-IN&gl=IN&ceid=IN:en"
+        try:
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            root = ET.fromstring(response.content)
+            item = root.find("./channel/item")
+            if item is None:
+                continue
+            headline = str(item.findtext("title", "")).strip()
+            link = str(item.findtext("link", "")).strip()
+            published = str(item.findtext("pubDate", "")).strip()
+            if not headline:
+                continue
+            rows.append(
+                {
+                    "stock": stock_name,
+                    "headline": headline,
+                    "signal": classify_headline_signal(headline),
+                    "published": published,
+                    "link": link,
+                }
+            )
+        except Exception:
+            continue
+    return rows
+
+
+@st.cache_data(show_spinner=False, ttl=900)
+def fetch_global_cues_rows() -> tuple[list[dict], str]:
+    rows = []
+    score = 0
+    for label, symbol, cue_type in GLOBAL_CUE_SYMBOLS:
+        if yf is None:
+            break
+        try:
+            history = yf.download(symbol, period="5d", progress=False, threads=False, auto_adjust=False)
+        except Exception:
+            continue
+        close = extract_close_series(history)
+        if len(close) < 2:
+            continue
+        latest = float(close.iloc[-1])
+        previous = float(close.iloc[-2])
+        if previous == 0:
+            continue
+        percent_change = ((latest - previous) / previous) * 100.0
+        if cue_type == "volatility":
+            signal = "Bearish" if percent_change > 1.0 else "Bullish" if percent_change < -1.0 else "Neutral"
+        elif cue_type == "defensive":
+            signal = "Bearish" if percent_change > 0.5 else "Bullish" if percent_change < -0.5 else "Neutral"
+        else:
+            signal = "Bullish" if percent_change > 0.3 else "Bearish" if percent_change < -0.3 else "Neutral"
+        if signal == "Bullish":
+            score += 1
+        elif signal == "Bearish":
+            score -= 1
+        rows.append(
+            {
+                "market": label,
+                "last": round(latest, 2),
+                "change_pct": round(percent_change, 2),
+                "signal": signal,
+            }
+        )
+    overall = "Bullish" if score >= 2 else "Bearish" if score <= -2 else "Neutral"
+    return rows, overall
+
+
+def build_market_intelligence_payload(payload: dict | None) -> tuple[list[dict], list[dict], str]:
+    if not isinstance(payload, dict):
+        return [], [], "Neutral"
+    records = payload.get("records", [])
+    turning_records = [
+        record for record in records
+        if isinstance(record, dict) and record.get("trend") in {"turning_bullish", "turning_bearish"}
+    ]
+    ranked_turning_records = sorted(
+        turning_records,
+        key=lambda record: max(
+            normalize_numeric(record.get("turning_bullish_probability"), 0.0) or 0.0,
+            normalize_numeric(record.get("turning_bearish_probability"), 0.0) or 0.0,
+        ),
+        reverse=True,
+    )
+    news_rows = fetch_stock_news_rows(tuple(str(record.get("ticker", "")).replace(".NS", "") for record in ranked_turning_records))
+    global_cue_rows, overall_global_cue = fetch_global_cues_rows()
+    return news_rows, global_cue_rows, overall_global_cue
 
 
 def apply_page_style() -> None:
@@ -559,6 +773,8 @@ def build_index_summary(records: list[dict]) -> dict:
         "percent_up": percent_up,
         "percent_down": percent_down,
         "market_trend": market_trend,
+        "trade_mode": str(records[0].get("trade_mode", "swing")) if records else "swing",
+        "trade_horizon": str(records[0].get("trade_horizon", "5-10 trading days")) if records else "5-10 trading days",
     }
 
 
@@ -602,9 +818,13 @@ def run_command(
     return result
 
 
-def refresh_trend_data(index_name: str, lookback: int, intraday: bool) -> dict:
+def refresh_trend_data(index_name: str, trade_mode: str) -> dict:
     clear_latest_job_dir()
     LATEST_JOB_DIR.mkdir(parents=True, exist_ok=True)
+    selected_indices = expand_index_selection(index_name)
+    mode_settings = get_trade_mode_settings(trade_mode)
+    lookback = int(mode_settings["lookback_days"])
+    intraday = bool(mode_settings["intraday"])
 
     output_json = LATEST_JOB_DIR / "results_nifty_trend.json"
 
@@ -615,12 +835,11 @@ def refresh_trend_data(index_name: str, lookback: int, intraday: bool) -> dict:
     agent_cmd = [
         python_executable,
         str(REPO_ROOT / "scripts" / "agent_nifty_trend.py"),
-        "--indices", index_name,
-        "--lookback", str(int(lookback)),
+        "--indices", ",".join(selected_indices),
+        "--trade-mode", trade_mode,
+        "--lookback", str(lookback),
         "--out", str(output_json),
     ]
-    if intraday:
-        agent_cmd.append("--intraday")
 
     progress = st.progress(5, text="Preparing output folder...")
     progress.progress(20, text="Running trend analyzer...")
@@ -639,6 +858,8 @@ def refresh_trend_data(index_name: str, lookback: int, intraday: bool) -> dict:
             },
             "params": {
                 "index": index_name,
+                "indices": selected_indices,
+                "trade_mode": trade_mode,
                 "lookback": lookback,
                 "intraday": intraday,
                 "python_executable": python_executable,
@@ -649,7 +870,7 @@ def refresh_trend_data(index_name: str, lookback: int, intraday: bool) -> dict:
         return failure_payload
 
     progress.progress(70, text="Preparing selected index data...")
-    per_index_artifacts = write_per_index_json_files(output_json, LATEST_JOB_DIR, [index_name])
+    per_index_artifacts = write_per_index_json_files(output_json, LATEST_JOB_DIR, selected_indices)
 
     status_payload = {
         "status": "completed",
@@ -664,6 +885,8 @@ def refresh_trend_data(index_name: str, lookback: int, intraday: bool) -> dict:
         },
         "params": {
             "index": index_name,
+            "indices": selected_indices,
+            "trade_mode": trade_mode,
             "lookback": lookback,
             "intraday": intraday,
             "python_executable": python_executable,
@@ -676,6 +899,15 @@ def refresh_trend_data(index_name: str, lookback: int, intraday: bool) -> dict:
 
 
 def load_index_payload_from_status(status_payload: dict, index_name: str) -> dict | None:
+    if index_name == "all_indices":
+        artifacts = status_payload.get("artifacts", {})
+        combined_report_path = artifacts.get("results_json")
+        if combined_report_path:
+            resolved_combined_report_path = resolve_artifact_path(combined_report_path)
+            if resolved_combined_report_path.exists():
+                return load_json(resolved_combined_report_path)
+        return None
+
     artifacts = status_payload.get("artifacts", {})
     artifact_key = f"{sanitize_index_name(index_name)}_json_report"
     report_path = artifacts.get(artifact_key)
@@ -707,6 +939,15 @@ def load_index_payload_from_status(status_payload: dict, index_name: str) -> dic
 
 
 def get_index_report_path_from_status(status_payload: dict, index_name: str) -> Path | None:
+    if index_name == "all_indices":
+        report_path = status_payload.get("artifacts", {}).get("results_json")
+        if not report_path:
+            return None
+        resolved_report_path = resolve_artifact_path(report_path)
+        if resolved_report_path.exists():
+            return resolved_report_path
+        return None
+
     artifacts = status_payload.get("artifacts", {})
     artifact_key = f"{sanitize_index_name(index_name)}_json_report"
     report_path = artifacts.get(artifact_key)
@@ -739,7 +980,9 @@ def build_predictor_cache_fingerprint(index_name: str, payload: dict, predictor_
         allowed_trends = {"turning_bullish", "turning_bearish"}
         selected_fields = [
             "ticker", "trend", "close", "rsi", "percent_change", "volume",
-            "avg_volume_20", "volume_ratio", "turning_bullish_score", "turning_bearish_score",
+            "avg_volume_20", "volume_ratio", "atr14",
+            "turning_bullish_score", "turning_bearish_score",
+            "turning_bullish_probability", "turning_bearish_probability", "index",
         ]
     else:
         allowed_trends = {"up", "down"}
@@ -828,6 +1071,63 @@ def render_summary(summary: dict) -> None:
     col2.metric("Percent Up", f"{(summary.get('percent_up') or 0) * 100:.2f}%")
     col3.metric("Percent Down", f"{(summary.get('percent_down') or 0) * 100:.2f}%")
     col4.metric("Market Trend", str(summary.get("market_trend", "unknown")).title())
+    horizon = str(summary.get("trade_horizon", "")).strip()
+    mode = str(summary.get("trade_mode", "swing")).strip()
+    if horizon:
+        st.caption(f"Mode: {TRADE_MODE_LABELS.get(mode, mode.title())} | Horizon: {horizon}")
+
+
+def render_market_intelligence_sidebar(payload: dict | None) -> None:
+    news_rows, global_cue_rows, overall_global_cue = build_market_intelligence_payload(payload)
+    st.header("Market Intelligence")
+    intelligence_section = st.radio(
+        "Section",
+        options=("Stock In News", "Global Cues"),
+        horizontal=True,
+        key="market_intelligence_section",
+        label_visibility="collapsed",
+    )
+
+    if intelligence_section == "Stock In News":
+        st.markdown('<div class="sidebar-card"><p>Stock In News</p></div>', unsafe_allow_html=True)
+        if news_rows:
+            for row in news_rows:
+                signal = str(row.get("signal", "Neutral"))
+                signal_color = "#15803d" if signal == "Bullish" else "#b91c1c" if signal == "Bearish" else "#475569"
+                st.markdown(
+                    (
+                        '<div class="sidebar-card">'
+                        f'<p style="margin-bottom:0.35rem;">{html.escape(str(row.get("stock", "")))}</p>'
+                        f'<div style="font-size:0.82rem; line-height:1.35; margin-bottom:0.35rem;">'
+                        f'<a href="{html.escape(str(row.get("link", "")), quote=True)}" target="_blank">{html.escape(str(row.get("headline", "")))}</a>'
+                        '</div>'
+                        f'<div style="font-size:0.78rem; color:{signal_color}; font-weight:700;">{signal}</div>'
+                        '</div>'
+                    ),
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.info("No stock-specific news found for current turning candidates.")
+    else:
+        st.markdown('<div class="sidebar-card"><p>Global Cues For The Day</p></div>', unsafe_allow_html=True)
+        st.caption(f"Overall cue: {overall_global_cue}")
+        if global_cue_rows:
+            for row in global_cue_rows:
+                signal = str(row.get("signal", "Neutral"))
+                signal_color = "#15803d" if signal == "Bullish" else "#b91c1c" if signal == "Bearish" else "#475569"
+                st.markdown(
+                    (
+                        '<div class="sidebar-card">'
+                        f'<p style="margin-bottom:0.3rem;">{html.escape(str(row.get("market", "")))}</p>'
+                        f'<div style="font-size:0.8rem; margin-bottom:0.2rem;">Last: {float(row.get("last", 0.0)):.2f}</div>'
+                        f'<div style="font-size:0.8rem; margin-bottom:0.2rem;">Change: {float(row.get("change_pct", 0.0)):.2f}%</div>'
+                        f'<div style="font-size:0.78rem; color:{signal_color}; font-weight:700;">{signal}</div>'
+                        '</div>'
+                    ),
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.info("No live global cue data was available right now.")
 
 
 def render_index_result(title: str, payload: dict) -> None:
@@ -838,12 +1138,26 @@ def render_index_result(title: str, payload: dict) -> None:
         st.warning("No records found for this index.")
         return
 
-    frame = pd.DataFrame(records)
+    turning_records = [
+        {**record, **build_turning_trade_levels(record)}
+        for record in records
+        if isinstance(record, dict) and record.get("trend") in {"turning_bullish", "turning_bearish"}
+    ]
+    if not turning_records:
+        st.info("No turning bullish or turning bearish stocks met the standardized trade filter in the latest refresh.")
+        return
+
+    frame = pd.DataFrame(turning_records)
     if "ticker" in frame.columns:
         frame["stock_name"] = frame["ticker"].astype(str).str.replace(".NS", "", regex=False)
     if "trend" in frame.columns:
         frame["trend direction"] = frame["trend"].astype(str).str.replace("_", " ").str.title()
-    visible_columns = [column for column in ["stock_name", "trend direction", "close", "percent_change", "rsi"] if column in frame.columns]
+    visible_columns = [
+        column for column in [
+            "stock_name", "trend direction", "turning_bullish_probability",
+            "turning_bearish_probability", "close", "percent_change", "rsi"
+        ] if column in frame.columns
+    ]
     display_frame = frame[visible_columns] if visible_columns else frame
 
     if "stock_name" in display_frame.columns:
@@ -851,6 +1165,8 @@ def render_index_result(title: str, payload: dict) -> None:
             columns={
                 "stock_name": "Stock Name",
                 "trend direction": "Trend Direction",
+                "turning_bullish_probability": "Bullish Probability",
+                "turning_bearish_probability": "Bearish Probability",
                 "close": "Close Price",
                 "percent_change": "% Change",
                 "rsi": "RSI",
@@ -858,32 +1174,21 @@ def render_index_result(title: str, payload: dict) -> None:
         )
 
     uptrend_frame = (
-        display_frame[display_frame["Trend Direction"].isin(["Up", "Turning Bullish"])]
+        display_frame[display_frame["Trend Direction"] == "Turning Bullish"]
         if "Trend Direction" in display_frame.columns else pd.DataFrame()
     )
     downtrend_frame = (
-        display_frame[display_frame["Trend Direction"].isin(["Down", "Turning Bearish"])]
+        display_frame[display_frame["Trend Direction"] == "Turning Bearish"]
         if "Trend Direction" in display_frame.columns else pd.DataFrame()
     )
-
-    if "Trend Direction" in uptrend_frame.columns:
-        uptrend_frame = uptrend_frame.assign(_priority=uptrend_frame["Trend Direction"].map(TREND_PRIORITY).fillna(99))
-    if "Trend Direction" in downtrend_frame.columns:
-        downtrend_frame = downtrend_frame.assign(_priority=downtrend_frame["Trend Direction"].map(TREND_PRIORITY).fillna(99))
-
-    if "RSI" in uptrend_frame.columns:
-        uptrend_frame = uptrend_frame.sort_values(by=["_priority", "RSI"], ascending=[True, False], na_position="last")
-    elif "_priority" in uptrend_frame.columns:
-        uptrend_frame = uptrend_frame.sort_values(by="_priority", ascending=True, na_position="last")
-    if "RSI" in downtrend_frame.columns:
-        downtrend_frame = downtrend_frame.sort_values(by=["_priority", "RSI"], ascending=[True, True], na_position="last")
-    elif "_priority" in downtrend_frame.columns:
-        downtrend_frame = downtrend_frame.sort_values(by="_priority", ascending=True, na_position="last")
-
-    if "_priority" in uptrend_frame.columns:
-        uptrend_frame = uptrend_frame.drop(columns=["_priority"])
-    if "_priority" in downtrend_frame.columns:
-        downtrend_frame = downtrend_frame.drop(columns=["_priority"])
+    if "Bullish Probability" in uptrend_frame.columns:
+        uptrend_frame = uptrend_frame.sort_values(by=["Bullish Probability", "RSI"], ascending=[False, False], na_position="last")
+    elif "RSI" in uptrend_frame.columns:
+        uptrend_frame = uptrend_frame.sort_values(by=["RSI"], ascending=[False], na_position="last")
+    if "Bearish Probability" in downtrend_frame.columns:
+        downtrend_frame = downtrend_frame.sort_values(by=["Bearish Probability", "RSI"], ascending=[False, True], na_position="last")
+    elif "RSI" in downtrend_frame.columns:
+        downtrend_frame = downtrend_frame.sort_values(by=["RSI"], ascending=[True], na_position="last")
 
     def themed_table_html(dataframe: pd.DataFrame, theme: str):
         table_class = "up-table" if theme == "up" else "down-table"
@@ -892,10 +1197,10 @@ def render_index_result(title: str, payload: dict) -> None:
         for _, row in dataframe.iterrows():
             formatted_values = []
             for column, value in row.items():
-                if column in {"Close Price", "RSI", "% Change"} and isinstance(value, (int, float)):
+                if column in {"Bullish Probability", "Bearish Probability", "Close Price", "RSI", "% Change"} and isinstance(value, (int, float)):
                     formatted_values.append(f"{value:.2f}")
                 else:
-                    formatted_values.append(value)
+                    formatted_values.append(html.escape(str(value)))
             cells = "".join(f"<td>{value}</td>" for value in formatted_values)
             rows.append(f"<tr>{cells}</tr>")
         body = "".join(rows)
@@ -909,39 +1214,95 @@ def render_index_result(title: str, payload: dict) -> None:
         )
 
     st.markdown('<div class="trend-card uptrend-card">', unsafe_allow_html=True)
-    st.subheader("Uptrend Stocks")
+    st.subheader("Turning Bullish Stocks")
     if uptrend_frame.empty:
-        st.info("No uptrend stocks in the latest refresh.")
+        st.info("No turning bullish stocks met the standardized trade filter in the latest refresh.")
     else:
         st.markdown(themed_table_html(uptrend_frame, "up"), unsafe_allow_html=True)
+        selected_bullish_stock = st.pills(
+            f"Select turning bullish stock in {title}",
+            options=uptrend_frame["Stock Name"].tolist(),
+            selection_mode="single",
+            key=f"selected_trade::{title}::turning_bullish",
+        )
+        bullish_record = None
+        if selected_bullish_stock:
+            bullish_record = next(
+                (record for record in turning_records if str(record.get("ticker", "")).replace(".NS", "") == selected_bullish_stock),
+                None,
+            )
+        if bullish_record is not None:
+            bullish_trade = build_turning_trade_levels(bullish_record)
+            st.caption(f"Selected: {selected_bullish_stock}")
+            st.markdown(
+                f"**Buy:** {bullish_trade['buy_price']:.2f} &nbsp;&nbsp; **Target:** {bullish_trade['target_price']:.2f} &nbsp;&nbsp; **Stop Loss:** {bullish_trade['stop_loss']:.2f}",
+                unsafe_allow_html=True,
+            )
     st.markdown('</div>', unsafe_allow_html=True)
 
+
     st.markdown('<div class="trend-card downtrend-card">', unsafe_allow_html=True)
-    st.subheader("Downtrend Stocks")
+    st.subheader("Turning Bearish Stocks")
     if downtrend_frame.empty:
-        st.info("No downtrend stocks in the latest refresh.")
+        st.info("No turning bearish stocks met the standardized trade filter in the latest refresh.")
     else:
         st.markdown(themed_table_html(downtrend_frame, "down"), unsafe_allow_html=True)
+        selected_bearish_stock = st.pills(
+            f"Select turning bearish stock in {title}",
+            options=downtrend_frame["Stock Name"].tolist(),
+            selection_mode="single",
+            key=f"selected_trade::{title}::turning_bearish",
+        )
+        bearish_record = None
+        if selected_bearish_stock:
+            bearish_record = next(
+                (record for record in turning_records if str(record.get("ticker", "")).replace(".NS", "") == selected_bearish_stock),
+                None,
+            )
+        if bearish_record is not None:
+            bearish_trade = build_turning_trade_levels(bearish_record)
+            st.caption(f"Selected: {selected_bearish_stock}")
+            st.markdown(
+                f"**Buy:** {bearish_trade['buy_price']:.2f} &nbsp;&nbsp; **Target:** {bearish_trade['target_price']:.2f} &nbsp;&nbsp; **Stop Loss:** {bearish_trade['stop_loss']:.2f}",
+                unsafe_allow_html=True,
+            )
     st.markdown('</div>', unsafe_allow_html=True)
 
 
 def render_results(status_payload: dict) -> None:
     selected_index = status_payload.get("params", {}).get("index", DEFAULT_INDEX)
-
-    st.markdown(
-        f"""
-        <div class="dashboard-hero">
-            <h2>{INDEX_LABELS.get(selected_index, selected_index)}</h2>
-            <p>Latest trend refresh with separate uptrend and downtrend stock blocks.</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    selected_trade_mode = str(status_payload.get("params", {}).get("trade_mode", "swing"))
+    if selected_index == "all_indices":
+        st.markdown(
+            f"""
+            <div class="dashboard-hero">
+                <h2>All Supported Indices</h2>
+                <p>Latest {TRADE_MODE_LABELS.get(selected_trade_mode, 'Swing (5-10 Days)').lower()} turning-trend refresh grouped by index.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        for index_key in expand_index_selection(selected_index):
+            payload = load_index_payload_from_status(status_payload, index_key)
+            if payload is not None:
+                render_index_result(INDEX_LABELS.get(index_key, index_key), payload)
+        return
 
     payload = load_index_payload_from_status(status_payload, selected_index)
     if payload is None:
         st.info("Latest cached report is unavailable on this deployment. Click **Refresh Data** to generate a new report.")
         return
+
+    summary_mode = str(payload.get("summary", {}).get("trade_mode", selected_trade_mode))
+    st.markdown(
+        f"""
+        <div class="dashboard-hero">
+            <h2>{INDEX_LABELS.get(selected_index, selected_index)}</h2>
+            <p>Latest {TRADE_MODE_LABELS.get(summary_mode, 'Swing (5-10 Days)').lower()} turning bullish and turning bearish trade candidates.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     render_index_result(INDEX_LABELS.get(selected_index, selected_index), payload)
 
@@ -964,6 +1325,8 @@ def render_prediction_results(prediction: dict) -> None:
         if frame.empty:
             return frame
         frame["ticker"] = frame["ticker"].astype(str).str.replace(".NS", "", regex=False)
+        if "index" in frame.columns:
+            frame["index"] = frame["index"].astype(str).map(lambda item: INDEX_LABELS.get(item, item))
         if "trend" in frame.columns:
             frame["trend"] = frame["trend"].astype(str).str.replace("_", " ").str.title()
         frame = frame.rename(
@@ -1043,6 +1406,20 @@ def render_prediction_results(prediction: dict) -> None:
 
 
 def render_turning_prediction_results(prediction: dict) -> None:
+    if isinstance(prediction.get("indices"), list):
+        st.markdown(
+            """
+            <div class="dashboard-hero">
+                <h2>AI Turning Predictor - All Supported Indices</h2>
+                <p>Standardized turning bullish and turning bearish lists grouped by index.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        for index_prediction in prediction["indices"]:
+            render_turning_prediction_results(index_prediction)
+        return
+
     st.markdown(
         f"""
         <div class="dashboard-hero">
@@ -1072,13 +1449,15 @@ def render_turning_prediction_results(prediction: dict) -> None:
                 "target_price": "Target",
                 "stop_loss": "Stop Loss",
                 "turning_score": "Turning Score",
+                "turning_probability": "Probability",
                 "signal_strength": "Signal Strength",
                 "volume_ratio": "Volume Ratio",
+                "index": "Index",
             }
         )
         visible_columns = [
             column for column in [
-                "Stock Name", "Trend Direction", "RSI", "Close Price", "Buy Price",
+                "Index", "Stock Name", "Trend Direction", "Probability", "RSI", "Close Price", "Buy Price",
                 "Target", "Stop Loss", "Turning Score", "Signal Strength", "Volume Ratio"
             ] if column in frame.columns
         ]
@@ -1091,7 +1470,7 @@ def render_turning_prediction_results(prediction: dict) -> None:
         for _, row in dataframe.iterrows():
             formatted_values = []
             for column, value in row.items():
-                if column in {"RSI", "Close Price", "Buy Price", "Target", "Stop Loss", "Volume Ratio"} and isinstance(value, (int, float)):
+                if column in {"Probability", "RSI", "Close Price", "Buy Price", "Target", "Stop Loss", "Volume Ratio"} and isinstance(value, (int, float)):
                     formatted_values.append(f"{value:.2f}")
                 else:
                     formatted_values.append(value)
@@ -1124,13 +1503,13 @@ def render_turning_prediction_results(prediction: dict) -> None:
 
     themed_predictor_block(
         "AI Turning Bullish Picks",
-        "Top bullish reversal candidates with buy, target, and stop-loss levels.",
+        "Standardized bullish reversal candidates ranked by reversal probability.",
         picks_to_frame(prediction.get("turning_bullish_picks", [])),
         "up",
     )
     themed_predictor_block(
         "AI Turning Bearish Picks",
-        "Top bearish reversal candidates with buy, target, and stop-loss levels.",
+        "Standardized bearish reversal candidates ranked by reversal probability.",
         picks_to_frame(prediction.get("turning_bearish_picks", [])),
         "down",
     )
@@ -1147,19 +1526,10 @@ def main() -> None:
     st.set_page_config(page_title="Stock Trend Dashboard", layout="wide")
     apply_page_style()
     st.title("Stock Analyzer Trend Dashboard")
-    st.caption("Runs the trend scripts directly and renders the latest Nifty 50, Midcap 100, and Smallcap 100 JSON results.")
+    st.caption("Runs the trend scripts directly and renders the latest Nifty 50, Midcap 100, and Smallcap 100 JSON results, including standardized turning-trend candidates.")
 
     if "latest_status" not in st.session_state:
         st.session_state["latest_status"] = load_existing_status()
-    if "prediction_status" not in st.session_state:
-        st.session_state["prediction_status"] = None
-    if "prediction_result" not in st.session_state:
-        st.session_state["prediction_result"] = None
-    if "turning_prediction_status" not in st.session_state:
-        st.session_state["turning_prediction_status"] = None
-    if "turning_prediction_result" not in st.session_state:
-        st.session_state["turning_prediction_result"] = None
-
     with st.sidebar:
         st.header("Refresh Settings")
         selected_index = st.selectbox(
@@ -1168,104 +1538,28 @@ def main() -> None:
             format_func=lambda item: INDEX_LABELS[item],
             index=INDEX_OPTIONS.index(DEFAULT_INDEX),
         )
-        st.markdown('<div class="sidebar-card"><p>Lookback Period</p></div>', unsafe_allow_html=True)
-        lookback = st.number_input("Lookback Days", min_value=1, max_value=30, value=30, step=1)
-        intraday = st.checkbox("Enable Intraday VWAP", value=False)
+        trade_mode = st.selectbox(
+            "Trade Mode",
+            options=list(TRADE_MODE_OPTIONS),
+            format_func=lambda item: TRADE_MODE_LABELS[item],
+            index=0,
+        )
+        trade_mode_settings = get_trade_mode_settings(trade_mode)
+        st.markdown(
+            f"<div class='sidebar-card'><p>Lookback: {trade_mode_settings['lookback_days']} days<br/>Horizon: {trade_mode_settings['horizon']}</p></div>",
+            unsafe_allow_html=True,
+        )
+        st.caption(trade_mode_settings["caption"])
         if st.button("Refresh Data", type="primary", use_container_width=True):
-            st.session_state["latest_status"] = refresh_trend_data(selected_index, int(lookback), intraday)
-            st.session_state["prediction_status"] = None
-            st.session_state["prediction_result"] = None
-            st.session_state["turning_prediction_status"] = None
-            st.session_state["turning_prediction_result"] = None
+            st.session_state["latest_status"] = refresh_trend_data(selected_index, trade_mode)
 
-        st.header("AI Predictor")
-        predictor_index = st.selectbox(
-            "Predictor Index",
-            options=INDEX_OPTIONS,
-            format_func=lambda item: INDEX_LABELS[item],
-            index=INDEX_OPTIONS.index(DEFAULT_INDEX),
-            key="predictor_index",
-        )
-        github_token_configured = bool(get_runtime_setting("GITHUB_TOKEN"))
-        sidebar_predictor_warning = None
-        if st.button("Run AI Predictor", use_container_width=True):
-            latest_status = st.session_state.get("latest_status")
-            if not github_token_configured:
-                st.session_state["prediction_status"] = {
-                    "status": "failed",
-                    "error_excerpt": "GITHUB_TOKEN is not configured. Add it to Streamlit secrets, the repo-root .env file, or environment variables.",
-                }
-                sidebar_predictor_warning = st.session_state["prediction_status"]["error_excerpt"]
-            elif not latest_status or latest_status.get("status") != "completed":
-                st.session_state["prediction_status"] = {
-                    "status": "warning",
-                    "error_excerpt": "First refresh the data, then use AI Predictor.",
-                }
-                sidebar_predictor_warning = st.session_state["prediction_status"]["error_excerpt"]
-            elif latest_status.get("params", {}).get("index") != predictor_index:
-                st.session_state["prediction_status"] = {
-                    "status": "warning",
-                    "error_excerpt": f"First refresh data for {INDEX_LABELS[predictor_index]}, then use AI Predictor.",
-                }
-                sidebar_predictor_warning = st.session_state["prediction_status"]["error_excerpt"]
-            else:
-                try:
-                    prediction_result = run_openai_predictor(predictor_index, latest_status)
-                    st.session_state["prediction_status"] = {"status": "completed"}
-                    st.session_state["prediction_result"] = prediction_result
-                    st.session_state["turning_prediction_status"] = None
-                    st.session_state["turning_prediction_result"] = None
-                except ValueError as exc:
-                    st.session_state["prediction_status"] = {"status": "failed", "error_excerpt": str(exc)}
-                    sidebar_predictor_warning = str(exc)
-        if sidebar_predictor_warning:
-            st.warning(sidebar_predictor_warning)
-
-        st.header("AI Turning Predictor")
-        turning_predictor_index = st.selectbox(
-            "Turning Predictor Index",
-            options=INDEX_OPTIONS,
-            format_func=lambda item: INDEX_LABELS[item],
-            index=INDEX_OPTIONS.index(DEFAULT_INDEX),
-            key="turning_predictor_index",
-        )
-        sidebar_turning_warning = None
-        if st.button("Run Turning AI Predictor", use_container_width=True):
-            latest_status = st.session_state.get("latest_status")
-            if not github_token_configured:
-                st.session_state["turning_prediction_status"] = {
-                    "status": "failed",
-                    "error_excerpt": "GITHUB_TOKEN is not configured. Add it to Streamlit secrets, the repo-root .env file, or environment variables.",
-                }
-                sidebar_turning_warning = st.session_state["turning_prediction_status"]["error_excerpt"]
-            elif not latest_status or latest_status.get("status") != "completed":
-                st.session_state["turning_prediction_status"] = {
-                    "status": "warning",
-                    "error_excerpt": "First refresh the data, then use AI Turning Predictor.",
-                }
-                sidebar_turning_warning = st.session_state["turning_prediction_status"]["error_excerpt"]
-            elif latest_status.get("params", {}).get("index") != turning_predictor_index:
-                st.session_state["turning_prediction_status"] = {
-                    "status": "warning",
-                    "error_excerpt": f"First refresh data for {INDEX_LABELS[turning_predictor_index]}, then use AI Turning Predictor.",
-                }
-                sidebar_turning_warning = st.session_state["turning_prediction_status"]["error_excerpt"]
-            else:
-                try:
-                    turning_prediction_result = run_ai_predictor(turning_predictor_index, latest_status, predictor_mode="turning")
-                    st.session_state["turning_prediction_status"] = {"status": "completed"}
-                    st.session_state["turning_prediction_result"] = turning_prediction_result
-                    st.session_state["prediction_status"] = None
-                    st.session_state["prediction_result"] = None
-                except ValueError as exc:
-                    st.session_state["turning_prediction_status"] = {"status": "failed", "error_excerpt": str(exc)}
-                    sidebar_turning_warning = str(exc)
-        if sidebar_turning_warning:
-            st.warning(sidebar_turning_warning)
+        latest_status = st.session_state.get("latest_status")
+        sidebar_payload = None
+        if latest_status and latest_status.get("status") == "completed" and status_covers_index(latest_status, selected_index):
+            sidebar_payload = load_index_payload_from_status(latest_status, selected_index)
+        render_market_intelligence_sidebar(sidebar_payload)
 
     latest_status = st.session_state.get("latest_status")
-    prediction_result = st.session_state.get("prediction_result")
-    turning_prediction_result = st.session_state.get("turning_prediction_result")
     if latest_status:
         if latest_status.get("status") == "failed":
             st.error("Trend refresh failed.")
@@ -1273,33 +1567,11 @@ def main() -> None:
                 st.caption(f"Failed step: `{latest_status['failed_step']}`")
             if latest_status.get("error_excerpt"):
                 st.code(latest_status["error_excerpt"])
-        elif not prediction_result and not turning_prediction_result:
+        else:
             st.success("Latest trend data loaded.")
             render_results(latest_status)
     else:
         st.info("Click **Refresh Data** to run the analyzer scripts and load the latest trend JSON files.")
-
-    prediction_status = st.session_state.get("prediction_status")
-    if prediction_status and prediction_status.get("status") == "warning":
-        if not prediction_result:
-            st.info("Use Refresh Data first, then run AI Predictor for the same selected index.")
-    elif prediction_status and prediction_status.get("status") == "failed":
-        st.error("AI prediction failed.")
-        if prediction_status.get("error_excerpt"):
-            st.code(str(prediction_status["error_excerpt"]))
-    elif prediction_result:
-        render_prediction_results(prediction_result)
-
-    turning_prediction_status = st.session_state.get("turning_prediction_status")
-    if turning_prediction_status and turning_prediction_status.get("status") == "warning":
-        if not turning_prediction_result:
-            st.info("Use Refresh Data first, then run AI Turning Predictor for the same selected index.")
-    elif turning_prediction_status and turning_prediction_status.get("status") == "failed":
-        st.error("AI turning prediction failed.")
-        if turning_prediction_status.get("error_excerpt"):
-            st.code(str(turning_prediction_status["error_excerpt"]))
-    elif turning_prediction_result:
-        render_turning_prediction_results(turning_prediction_result)
 
 
 if __name__ == "__main__":
