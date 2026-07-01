@@ -1,6 +1,6 @@
 {
   "summary": {
-    "timestamp": "2026-07-01T17:18:19.553168Z",
+    "timestamp": "2026-07-01T17:16:14.320378Z",
     "total_tickers": 49,
     "percent_up": 0.5918367346938775,
     "percent_down": 0.40816326530612246,
@@ -87,7 +87,7 @@
       },
       "trend": "up",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:14.675725Z"
+      "timestamp": "2026-07-01T17:16:09.493662Z"
     },
     {
       "ticker": "ADANIPORTS.NS",
@@ -165,7 +165,7 @@
       },
       "trend": "up",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:14.710632Z"
+      "timestamp": "2026-07-01T17:16:09.540914Z"
     },
     {
       "ticker": "APOLLOHOSP.NS",
@@ -243,7 +243,7 @@
       },
       "trend": "up",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:14.760622Z"
+      "timestamp": "2026-07-01T17:16:09.588910Z"
     },
     {
       "ticker": "ASIANPAINT.NS",
@@ -321,7 +321,7 @@
       },
       "trend": "turning_bullish",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:14.805712Z"
+      "timestamp": "2026-07-01T17:16:09.621148Z"
     },
     {
       "ticker": "AXISBANK.NS",
@@ -399,7 +399,7 @@
       },
       "trend": "up",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:14.843878Z"
+      "timestamp": "2026-07-01T17:16:09.674603Z"
     },
     {
       "ticker": "BAJAJ-AUTO.NS",
@@ -477,7 +477,7 @@
       },
       "trend": "down",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:14.899664Z"
+      "timestamp": "2026-07-01T17:16:09.704429Z"
     },
     {
       "ticker": "BAJAJFINSV.NS",
@@ -555,7 +555,7 @@
       },
       "trend": "up",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:14.950521Z"
+      "timestamp": "2026-07-01T17:16:09.748785Z"
     },
     {
       "ticker": "BAJFINANCE.NS",
@@ -633,7 +633,7 @@
       },
       "trend": "up",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:14.992559Z"
+      "timestamp": "2026-07-01T17:16:09.796400Z"
     },
     {
       "ticker": "BEL.NS",
@@ -711,7 +711,7 @@
       },
       "trend": "turning_bullish",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:15.029014Z"
+      "timestamp": "2026-07-01T17:16:09.828219Z"
     },
     {
       "ticker": "BHARTIARTL.NS",
@@ -789,7 +789,7 @@
       },
       "trend": "turning_bullish",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:15.063394Z"
+      "timestamp": "2026-07-01T17:16:09.875365Z"
     },
     {
       "ticker": "BPCL.NS",
@@ -867,7 +867,7 @@
       },
       "trend": "up",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:15.099084Z"
+      "timestamp": "2026-07-01T17:16:09.907483Z"
     },
     {
       "ticker": "BRITANNIA.NS",
@@ -945,7 +945,7 @@
       },
       "trend": "turning_bullish",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:15.134446Z"
+      "timestamp": "2026-07-01T17:16:09.970694Z"
     },
     {
       "ticker": "CIPLA.NS",
@@ -1023,7 +1023,7 @@
       },
       "trend": "up",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:15.168033Z"
+      "timestamp": "2026-07-01T17:16:10.002243Z"
     },
     {
       "ticker": "COALINDIA.NS",
@@ -1101,7 +1101,7 @@
       },
       "trend": "down",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:15.204094Z"
+      "timestamp": "2026-07-01T17:16:10.034164Z"
     },
     {
       "ticker": "DIVISLAB.NS",
@@ -1179,7 +1179,7 @@
       },
       "trend": "down",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:15.240791Z"
+      "timestamp": "2026-07-01T17:16:10.082176Z"
     },
     {
       "ticker": "DRREDDY.NS",
@@ -1257,7 +1257,7 @@
       },
       "trend": "up",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:15.278636Z"
+      "timestamp": "2026-07-01T17:16:10.114521Z"
     },
     {
       "ticker": "EICHERMOT.NS",
@@ -1335,7 +1335,7 @@
       },
       "trend": "down",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:15.319814Z"
+      "timestamp": "2026-07-01T17:16:10.177879Z"
     },
     {
       "ticker": "GRASIM.NS",
@@ -1413,7 +1413,7 @@
       },
       "trend": "turning_bullish",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:15.363513Z"
+      "timestamp": "2026-07-01T17:16:10.225795Z"
     },
     {
       "ticker": "HCLTECH.NS",
@@ -1491,7 +1491,7 @@
       },
       "trend": "down",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:15.402755Z"
+      "timestamp": "2026-07-01T17:16:10.258034Z"
     },
     {
       "ticker": "HDFCBANK.NS",
@@ -1569,7 +1569,7 @@
       },
       "trend": "up",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:15.439214Z"
+      "timestamp": "2026-07-01T17:16:10.289849Z"
     },
     {
       "ticker": "HDFCLIFE.NS",
@@ -1647,7 +1647,7 @@
       },
       "trend": "down",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:15.471132Z"
+      "timestamp": "2026-07-01T17:16:10.321685Z"
     },
     {
       "ticker": "HEROMOTOCO.NS",
@@ -1725,7 +1725,7 @@
       },
       "trend": "down",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:15.504501Z"
+      "timestamp": "2026-07-01T17:16:10.369438Z"
     },
     {
       "ticker": "HINDALCO.NS",
@@ -1803,7 +1803,7 @@
       },
       "trend": "down",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:15.535626Z"
+      "timestamp": "2026-07-01T17:16:10.402698Z"
     },
     {
       "ticker": "HINDUNILVR.NS",
@@ -1881,7 +1881,7 @@
       },
       "trend": "turning_bullish",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:15.571784Z"
+      "timestamp": "2026-07-01T17:16:10.442444Z"
     },
     {
       "ticker": "ICICIBANK.NS",
@@ -1959,7 +1959,7 @@
       },
       "trend": "up",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:15.608393Z"
+      "timestamp": "2026-07-01T17:16:10.482275Z"
     },
     {
       "ticker": "INDUSINDBK.NS",
@@ -2037,7 +2037,7 @@
       },
       "trend": "up",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:15.636135Z"
+      "timestamp": "2026-07-01T17:16:10.527368Z"
     },
     {
       "ticker": "INFY.NS",
@@ -2115,7 +2115,7 @@
       },
       "trend": "down",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:15.676515Z"
+      "timestamp": "2026-07-01T17:16:10.566592Z"
     },
     {
       "ticker": "ITC.NS",
@@ -2193,7 +2193,7 @@
       },
       "trend": "up",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:15.715499Z"
+      "timestamp": "2026-07-01T17:16:10.606621Z"
     },
     {
       "ticker": "JSWSTEEL.NS",
@@ -2271,7 +2271,7 @@
       },
       "trend": "down",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:15.756418Z"
+      "timestamp": "2026-07-01T17:16:10.639630Z"
     },
     {
       "ticker": "KOTAKBANK.NS",
@@ -2349,7 +2349,7 @@
       },
       "trend": "up",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:15.790895Z"
+      "timestamp": "2026-07-01T17:16:10.669717Z"
     },
     {
       "ticker": "LT.NS",
@@ -2427,7 +2427,7 @@
       },
       "trend": "turning_bearish",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:15.824183Z"
+      "timestamp": "2026-07-01T17:16:10.717278Z"
     },
     {
       "ticker": "M&M.NS",
@@ -2505,7 +2505,7 @@
       },
       "trend": "up",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:15.853304Z"
+      "timestamp": "2026-07-01T17:16:10.749144Z"
     },
     {
       "ticker": "MARUTI.NS",
@@ -2583,7 +2583,7 @@
       },
       "trend": "up",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:15.889773Z"
+      "timestamp": "2026-07-01T17:16:10.809312Z"
     },
     {
       "ticker": "NESTLEIND.NS",
@@ -2661,7 +2661,7 @@
       },
       "trend": "up",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:15.917139Z"
+      "timestamp": "2026-07-01T17:16:10.844133Z"
     },
     {
       "ticker": "NTPC.NS",
@@ -2739,7 +2739,7 @@
       },
       "trend": "down",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:15.954375Z"
+      "timestamp": "2026-07-01T17:16:10.891913Z"
     },
     {
       "ticker": "ONGC.NS",
@@ -2817,7 +2817,7 @@
       },
       "trend": "down",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:15.988047Z"
+      "timestamp": "2026-07-01T17:16:10.939999Z"
     },
     {
       "ticker": "POWERGRID.NS",
@@ -2895,7 +2895,7 @@
       },
       "trend": "down",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:16.020832Z"
+      "timestamp": "2026-07-01T17:16:10.972184Z"
     },
     {
       "ticker": "RELIANCE.NS",
@@ -2973,7 +2973,7 @@
       },
       "trend": "down",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:16.053170Z"
+      "timestamp": "2026-07-01T17:16:11.013014Z"
     },
     {
       "ticker": "SBILIFE.NS",
@@ -3051,7 +3051,7 @@
       },
       "trend": "turning_bullish",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:16.096271Z"
+      "timestamp": "2026-07-01T17:16:11.035609Z"
     },
     {
       "ticker": "SBIN.NS",
@@ -3129,7 +3129,7 @@
       },
       "trend": "up",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:16.136929Z"
+      "timestamp": "2026-07-01T17:16:11.083149Z"
     },
     {
       "ticker": "SHRIRAMFIN.NS",
@@ -3207,7 +3207,7 @@
       },
       "trend": "up",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:16.189409Z"
+      "timestamp": "2026-07-01T17:16:11.114989Z"
     },
     {
       "ticker": "SUNPHARMA.NS",
@@ -3285,7 +3285,7 @@
       },
       "trend": "up",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:16.229145Z"
+      "timestamp": "2026-07-01T17:16:11.146911Z"
     },
     {
       "ticker": "TATACONSUM.NS",
@@ -3363,7 +3363,7 @@
       },
       "trend": "down",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:16.269211Z"
+      "timestamp": "2026-07-01T17:16:11.179198Z"
     },
     {
       "ticker": "TATASTEEL.NS",
@@ -3441,7 +3441,7 @@
       },
       "trend": "down",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:19.334164Z"
+      "timestamp": "2026-07-01T17:16:14.103563Z"
     },
     {
       "ticker": "TCS.NS",
@@ -3519,7 +3519,7 @@
       },
       "trend": "down",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:19.393793Z"
+      "timestamp": "2026-07-01T17:16:14.154688Z"
     },
     {
       "ticker": "TECHM.NS",
@@ -3597,7 +3597,7 @@
       },
       "trend": "down",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:19.437244Z"
+      "timestamp": "2026-07-01T17:16:14.199649Z"
     },
     {
       "ticker": "TITAN.NS",
@@ -3675,7 +3675,7 @@
       },
       "trend": "up",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:19.469139Z"
+      "timestamp": "2026-07-01T17:16:14.245685Z"
     },
     {
       "ticker": "ULTRACEMCO.NS",
@@ -3753,7 +3753,7 @@
       },
       "trend": "up",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:19.501466Z"
+      "timestamp": "2026-07-01T17:16:14.287573Z"
     },
     {
       "ticker": "WIPRO.NS",
@@ -3831,7 +3831,7 @@
       },
       "trend": "down",
       "index": "nifty50",
-      "timestamp": "2026-07-01T17:18:19.553168Z"
+      "timestamp": "2026-07-01T17:16:14.320378Z"
     }
   ]
 }

@@ -1,7 +1,7 @@
 {
   "status": "completed",
-  "started_at": "2026-06-30T17:14:38.411698Z",
-  "finished_at": "2026-06-30T17:14:38.411698Z",
+  "started_at": "2026-07-01T17:18:19.809201Z",
+  "finished_at": "2026-07-01T17:18:19.809201Z",
   "artifacts": {
     "job_dir": "jobs/latest",
     "results_json": "jobs/latest/results_nifty_trend.json",

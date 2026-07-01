@@ -53,17 +53,17 @@ TRADE_MODE_SETTINGS = {
     'swing': {
         'lookback': 20,
         'intraday': False,
-        'probability_threshold': 60.0,
-        'probability_gap': 8.0,
-        'context_threshold': 0.25,
+        'probability_threshold': 62.0,   # calibrated: non-oversold stocks max ~68%, so 62 allows real signals
+        'probability_gap': 8.0,           # reasonable separation between bull/bear probability
+        'context_threshold': 0.30,        # requires meaningful prior weakness — not just noise
         'horizon_label': '5-10 trading days',
     },
     'intraday': {
         'lookback': 5,
         'intraday': True,
-        'probability_threshold': 62.0,
+        'probability_threshold': 65.0,   # slightly stricter for intraday
         'probability_gap': 8.0,
-        'context_threshold': 0.20,
+        'context_threshold': 0.30,
         'horizon_label': 'same day / next session',
     },
 }
@@ -307,8 +307,8 @@ def get_constituents_from_wikipedia(index_name):
     return []
 
 
-def simple_kalman(series, q=1e-5, r=0.001):
-    """1D Kalman smoother for a pandas Series. Returns numpy array of filtered values."""
+def simple_kalman(series, q=0.001, r=0.1):
+    """1D Kalman smoother. Higher q/r ratio = more responsive to price changes (better for reversal detection)."""
     n = len(series)
     if n == 0:
         return np.array([])
@@ -828,32 +828,55 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
         else:
             vwap_signal = latest_close > vwap_latest
     bearish_vwap_signal = None if vwap_signal is None else not vwap_signal
-    volume_bullish = volume_ratio is not None and volume_ratio >= 0.9 and latest_close >= prev_close
-    volume_bearish = volume_ratio is not None and volume_ratio >= 0.9 and latest_close <= prev_close
+    # Volume: use 70% of avg as floor (was 90% — too strict, filtered valid signals)
+    # Also accept if 5-day avg volume is elevated vs 20-day avg (sustained interest)
+    avg_volume_5 = float(volume.tail(5).mean()) if not volume.empty and len(volume) >= 5 else avg_volume_20
+    volume_elevated = (
+        latest_volume is not None and avg_volume_20 is not None and avg_volume_20 > 0 and
+        (volume_ratio >= 0.70 or (avg_volume_5 is not None and avg_volume_20 > 0 and avg_volume_5 / avg_volume_20 >= 1.10))
+    )
+    volume_bullish = volume_elevated and latest_close >= prev_close
+    volume_bearish = volume_elevated and latest_close <= prev_close
 
+    # Minimum histogram magnitude: at least 0.05% of close price to filter noise
+    _min_macd_hist_mag = (latest_close * 0.0005) if latest_close else 0.01
     macd_bullish = (
         macd_value is not None and
         macd_signal_value is not None and
         (
-            (prev_macd_value is not None and prev_macd_signal_value is not None and prev_macd_value <= prev_macd_signal_value and macd_value > macd_signal_value) or
-            (prev_macd_hist_value is not None and macd_hist_value is not None and macd_hist_value > prev_macd_hist_value)
+            # True crossover: MACD crossed above signal line
+            (prev_macd_value is not None and prev_macd_signal_value is not None and
+             prev_macd_value <= prev_macd_signal_value and macd_value > macd_signal_value) or
+            # Histogram improvement: must be meaningful (not just noise ticks)
+            (prev_macd_hist_value is not None and macd_hist_value is not None and
+             macd_hist_value > prev_macd_hist_value and
+             abs(macd_hist_value - prev_macd_hist_value) >= _min_macd_hist_mag)
         )
     )
     macd_bearish = (
         macd_value is not None and
         macd_signal_value is not None and
         (
-            (prev_macd_value is not None and prev_macd_signal_value is not None and prev_macd_value >= prev_macd_signal_value and macd_value < macd_signal_value) or
-            (prev_macd_hist_value is not None and macd_hist_value is not None and macd_hist_value < prev_macd_hist_value)
+            # True crossover: MACD crossed below signal line
+            (prev_macd_value is not None and prev_macd_signal_value is not None and
+             prev_macd_value >= prev_macd_signal_value and macd_value < macd_signal_value) or
+            # Histogram deterioration: must be meaningful
+            (prev_macd_hist_value is not None and macd_hist_value is not None and
+             macd_hist_value < prev_macd_hist_value and
+             abs(macd_hist_value - prev_macd_hist_value) >= _min_macd_hist_mag)
         )
     )
-    rsi_turning_bullish = rsi_value is not None and (
-        (prev_rsi is not None and prev_rsi < 30.0 and rsi_value > prev_rsi) or
-        (prev_rsi is not None and prev_rsi <= 50.0 and rsi_value > 50.0)
+    rsi_turning_bullish = rsi_value is not None and prev_rsi is not None and (
+        # Strong recovery: from genuine oversold (<30) bouncing above 35
+        (prev_rsi < 30.0 and rsi_value >= 35.0) or
+        # Momentum shift: RSI was weak (<45) and crossed above 50 (bullish midpoint cross)
+        (prev_rsi < 45.0 and rsi_value >= 50.0 and rsi_value > prev_rsi)
     )
-    rsi_turning_bearish = rsi_value is not None and (
-        (prev_rsi is not None and prev_rsi > 70.0 and rsi_value < prev_rsi) or
-        (prev_rsi is not None and prev_rsi >= 50.0 and rsi_value < 50.0)
+    rsi_turning_bearish = rsi_value is not None and prev_rsi is not None and (
+        # Strong fade: from genuine overbought (>70) dropping below 65
+        (prev_rsi > 70.0 and rsi_value <= 65.0) or
+        # Momentum shift: RSI was strong (>55) and crossed below 50 (bearish midpoint cross)
+        (prev_rsi > 55.0 and rsi_value <= 50.0 and rsi_value < prev_rsi)
     )
     kalman_turning_bullish = (
         kalman_level is not None and
@@ -874,7 +897,10 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
     macd_hist_strength = normalize_signed(macd_hist_value, atr14 or latest_close * 0.01 if latest_close else 1.0)
     bullish_context_score = clamp(
         (
-            (0.55 if prev_rsi is not None and prev_rsi <= 45.0 else 0.0) +
+            # Gradient RSI weakness: give partial credit even without extreme oversold
+            (0.55 if prev_rsi is not None and prev_rsi <= 30.0 else
+             0.40 if prev_rsi is not None and prev_rsi <= 40.0 else
+             0.20 if prev_rsi is not None and prev_rsi <= 50.0 else 0.0) +
             (0.25 if prev_close <= float(ema20_series.iloc[-2]) else 0.0) +
             (0.20 if prev_macd_value is not None and prev_macd_signal_value is not None and prev_macd_value <= prev_macd_signal_value else 0.0)
         ),
@@ -883,7 +909,10 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
     )
     bearish_context_score = clamp(
         (
-            (0.55 if prev_rsi is not None and prev_rsi >= 55.0 else 0.0) +
+            # Gradient RSI strength: give partial credit even without extreme overbought
+            (0.55 if prev_rsi is not None and prev_rsi >= 70.0 else
+             0.40 if prev_rsi is not None and prev_rsi >= 60.0 else
+             0.20 if prev_rsi is not None and prev_rsi >= 50.0 else 0.0) +
             (0.25 if prev_close >= float(ema20_series.iloc[-2]) else 0.0) +
             (0.20 if prev_macd_value is not None and prev_macd_signal_value is not None and prev_macd_value >= prev_macd_signal_value else 0.0)
         ),
@@ -917,7 +946,7 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
     turning_bullish_count = sum(1 for value in turning_bullish_available.values() if value)
     turning_bearish_count = sum(1 for value in turning_bearish_available.values() if value)
     turning_bullish_components = [
-        ('context_from_prior_weakness', bullish_context_score >= 0.55, 0.18),
+        ('context_from_prior_weakness', bullish_context_score >= 0.30, 0.18),
         ('macd_reversal', macd_bullish, 0.18),
         ('kalman_reclaim', kalman_turning_bullish, 0.14),
         ('rsi_recovery', rsi_turning_bullish, 0.12),
@@ -930,7 +959,7 @@ def evaluate_ticker(ticker, lookback_days=100, intraday=False, vwap_resolution='
         ('intraday_vwap_reclaim', bool(vwap_signal) if effective_intraday and vwap_signal is not None else False, 0.05),
     ]
     turning_bearish_components = [
-        ('context_from_prior_strength', bearish_context_score >= 0.55, 0.18),
+        ('context_from_prior_strength', bearish_context_score >= 0.30, 0.18),
         ('macd_reversal', macd_bearish, 0.18),
         ('kalman_breakdown', kalman_turning_bearish, 0.14),
         ('rsi_fade', rsi_turning_bearish, 0.12),
